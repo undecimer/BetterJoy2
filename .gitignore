@@ -269,3 +269,5 @@ build/
 /dist/Drivers/*
 
 !README.txt
+
+.refs/
