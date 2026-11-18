@@ -504,6 +504,21 @@ public class Switch2Device : IControllerDevice
         var active = input.MouseDistance != 0 && input.MouseDistance < 1000 && input.MouseRoughness < 4000;
         if (!active)
         {
+            // Controller lifted mid-click: release any held mouse buttons so
+            // the desktop isn't left dragging.
+            if (_prevMouseL)
+            {
+                WindowsInput.Simulate.Events().Release(ButtonCode.Left).Invoke();
+            }
+            if (_prevMouseR)
+            {
+                WindowsInput.Simulate.Events().Release(ButtonCode.Right).Invoke();
+            }
+            if (_prevMouseM)
+            {
+                WindowsInput.Simulate.Events().Release(ButtonCode.Middle).Invoke();
+            }
+            _prevMouseL = _prevMouseR = _prevMouseM = false;
             _mouseActive = false;
             return;
         }
@@ -514,10 +529,12 @@ public class Switch2Device : IControllerDevice
             var dy = SignedLoopingDifference16(_prevMouseY, input.MouseY);
             if (dx != 0 || dy != 0)
             {
+                // Optical counts are not gyro degrees: GyroMouseSensitivity
+                // (~1200) scales angular motion, so use a dedicated factor.
                 WindowsInput.Simulate.Events()
                     .MoveBy(
-                        (int)(dx * Config.GyroMouseSensitivity[0]),
-                        (int)(dy * Config.GyroMouseSensitivity[1]))
+                        (int)(dx * OpticalMouseSensitivity),
+                        (int)(dy * OpticalMouseSensitivity))
                     .Invoke();
             }
 
@@ -549,6 +566,8 @@ public class Switch2Device : IControllerDevice
         _mouseActive = true;
     }
 
+    private const float OpticalMouseSensitivity = 1.5f;
+
     private static int SignedLoopingDifference16(int previous, int current)
     {
         var diff = current - previous;
@@ -579,6 +598,12 @@ public class Switch2Device : IControllerDevice
         mainController._buttons[(int)Joycon.Button.Stick2] = otherController._buttons[(int)Joycon.Button.Stick];
         mainController._buttons[(int)Joycon.Button.Shoulder21] = otherController._buttons[(int)Joycon.Button.Shoulder1];
         mainController._buttons[(int)Joycon.Button.Shoulder22] = otherController._buttons[(int)Joycon.Button.Shoulder2];
+
+        // Buttons shared across both halves (the right Joy-Con 2 owns the
+        // hardware C button): merge so the joined output sees them.
+        mainController._buttons[(int)Joycon.Button.Chat] |= otherController._buttons[(int)Joycon.Button.Chat];
+        mainController._buttons[(int)Joycon.Button.Gl] |= otherController._buttons[(int)Joycon.Button.Gl];
+        mainController._buttons[(int)Joycon.Button.Gr] |= otherController._buttons[(int)Joycon.Button.Gr];
 
         mainController._stick2 = otherController._stick;
         mainController._sliderVal[1] = otherController._sliderVal[1];
