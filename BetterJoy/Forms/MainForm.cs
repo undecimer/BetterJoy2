@@ -1384,7 +1384,7 @@ public partial class MainForm : Form
     {
         if (InvokeRequired)
         {
-            BeginInvoke(new Action<Joycon, Joycon>(JoinJoycon), controller, other);
+            BeginInvoke(new Action<IControllerDevice, IControllerDevice>(JoinJoycon), controller, other);
             return;
         }
 
@@ -1404,7 +1404,7 @@ public partial class MainForm : Form
     {
         if (InvokeRequired)
         {
-            BeginInvoke(new Action<Joycon, Joycon>(SplitJoycon), controller, other);
+            BeginInvoke(new Action<IControllerDevice, IControllerDevice>(SplitJoycon), controller, other);
             return;
         }
 
