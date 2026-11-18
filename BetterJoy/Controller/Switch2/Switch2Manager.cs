@@ -126,7 +126,10 @@ internal sealed class Switch2Manager : IDisposable
                 return;
             }
 
-            _ = ConnectBleAsync(args.BluetoothAddress, productId, _cts.Token);
+            // The advertisement's address type must be carried into the connect:
+            // NS2 controllers advertise with random addresses, and assuming
+            // Public produces a device object that never answers GATT commands.
+            _ = ConnectBleAsync(args.BluetoothAddress, productId, args.BluetoothAddressType, null, _cts.Token);
         }
         catch (Exception e)
         {
@@ -150,7 +153,9 @@ internal sealed class Switch2Manager : IDisposable
 
             // Product ID from PnP characteristic (0x2A50) is resolved after
             // connect; Joy-Con 2 vs Pro 2 is decided inside the transport.
-            _ = ConnectBleAsync(address, 0, ct);
+            // FromIdAsync carries the AEP identity (incl. address type), which
+            // the raw address alone does not.
+            _ = ConnectBleAsync(address, 0, null, info.Id, ct);
         }
     }
 
@@ -168,7 +173,8 @@ internal sealed class Switch2Manager : IDisposable
         return ulong.TryParse(deviceId[(idx + 1)..], System.Globalization.NumberStyles.HexNumber, null, out address);
     }
 
-    private async Task ConnectBleAsync(ulong address, ushort advertisedPid, CancellationToken ct)
+    private async Task ConnectBleAsync(ulong address, ushort advertisedPid,
+        BluetoothAddressType? addressType, string? deviceId, CancellationToken ct)
     {
         if (!_connecting.TryAdd(address, 0))
         {
@@ -182,7 +188,11 @@ internal sealed class Switch2Manager : IDisposable
                 return;
             }
 
-            var device = await BluetoothLEDevice.FromBluetoothAddressAsync(address);
+            BluetoothLEDevice? device = deviceId != null
+                ? await BluetoothLEDevice.FromIdAsync(deviceId)
+                : addressType.HasValue
+                    ? await BluetoothLEDevice.FromBluetoothAddressAsync(address, addressType.Value)
+                    : await BluetoothLEDevice.FromBluetoothAddressAsync(address);
             if (device == null)
             {
                 // Unpaired: request pairing (ConfirmOnly) — Switch2Connect flow.
