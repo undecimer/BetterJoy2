@@ -1,5 +1,6 @@
 using BetterJoy.Collections;
 using BetterJoy.Controller;
+using BetterJoy.Controller.Switch2;
 using BetterJoy.Forms;
 using BetterJoy.HIDApi.Exceptions;
 using BetterJoy.HIDApi.Native;
@@ -37,6 +38,10 @@ public class JoyconManager
     private const ushort ProductFamicomI = 0x2007;
     private const ushort ProductFamicomII = 0x2007;
     private const ushort ProductN64 = 0x2019;
+    private const ushort ProductJoycon2R = 0x2066;
+    private const ushort ProductJoycon2L = 0x2067;
+    private const ushort ProductPro2 = 0x2069;
+    private const ushort ProductGameCubeNso = 0x2073;
 
     private readonly ILogger? _logger;
     private readonly MainForm _form;
@@ -225,6 +230,7 @@ public class JoyconManager
         {
             VendorId: VendorId,
             ProductId: ProductL or ProductR or ProductPro or ProductSNES or ProductN64
+                or ProductJoycon2R or ProductJoycon2L or ProductPro2 or ProductGameCubeNso
         };
 
         _3rdPartyControllers.SController? thirdParty = null;
@@ -270,6 +276,18 @@ public class JoyconManager
                 case ProductN64:
                     type = Joycon.ControllerType.N64;
                     break;
+                case ProductJoycon2R:
+                    type = Joycon.ControllerType.Joycon2Right;
+                    break;
+                case ProductJoycon2L:
+                    type = Joycon.ControllerType.Joycon2Left;
+                    break;
+                case ProductPro2:
+                    type = Joycon.ControllerType.Pro2;
+                    break;
+                case ProductGameCubeNso:
+                    type = Joycon.ControllerType.GameCubeNSO;
+                    break;
                 default:
                     _logger?.Log($"Invalid product ID: {info.ProductId}.", LogLevel.Error);
                     return;
@@ -288,10 +306,10 @@ public class JoyconManager
 
         var isUSB = info.BusType == BusType.USB;
 
-        OnDeviceConnected(info.Path, info.SerialNumber, type, isUSB, thirdParty != null);
+        OnDeviceConnected(info.Path, info.SerialNumber, info.ProductId, type, isUSB, thirdParty != null);
     }
 
-    private void OnDeviceConnected(string path, string serial, Joycon.ControllerType type, bool isUSB, bool isThirdparty, bool reconnect = false)
+    private void OnDeviceConnected(string path, string serial, ushort productId, Joycon.ControllerType type, bool isUSB, bool isThirdparty, bool reconnect = false)
     {
         var device = HIDApi.Device.OpenPath(path);
         if (!device.IsValid)
@@ -314,17 +332,46 @@ public class JoyconManager
         // Add controller to block-list for HidHide
         Program.AddDeviceToBlocklist(device);
 
-        var controller = new Joycon(
-            _logger,
-            _form,
-            device,
-            path,
-            serial,
-            isUSB,
-            index,
-            type,
-            isThirdparty
-        );
+        IControllerDevice controller;
+
+        if (Ns2Protocol.IsSwitch2Type(type))
+        {
+            controller = new Switch2Device(
+                _logger,
+                _form,
+                new Switch2UsbTransport(device, productId, _logger),
+                path,
+                serial,
+                isUSB,
+                index,
+                type
+            );
+        }
+        else
+        {
+            controller = new Joycon(
+                _logger,
+                _form,
+                device,
+                path,
+                serial,
+                isUSB,
+                index,
+                type,
+                isThirdparty
+            );
+        }
+
+        RegisterController(controller);
+    }
+
+    /// <summary>
+    /// Attaches a controller and registers it: list membership, UI, auto-join,
+    /// calibration, virtual controller and report loop. Shared by Switch 1 and
+    /// Switch 2 devices on any transport.
+    /// </summary>
+    internal void RegisterController(IControllerDevice controller)
+    {
         controller.StateChanged += OnControllerStateChanged;
 
         // Connect device straight away
@@ -334,7 +381,7 @@ public class JoyconManager
         }
         catch (Exception e)
         {
-            _logger?.Log($"[P{index + 1}] Could not connect.", e);
+            _logger?.Log($"[P{controller.PadId + 1}] Could not connect.", e);
             return;
         }
         finally
@@ -373,6 +420,8 @@ public class JoyconManager
 
         controller.Begin();
     }
+
+    internal int GetControllerPadId(Joycon.ControllerType type) => GetControllerIndex(type);
 
     private void OnDeviceDisconnected(DeviceInfo info)
     {
@@ -462,7 +511,7 @@ public class JoyconManager
         }
 
         OnDeviceDisconnected(controller);
-        OnDeviceConnected(controller.Path, controller.SerialNumber, controller.Type, controller.IsUSB, controller.IsThirdParty, true);
+        OnDeviceConnected(controller.Path, controller.SerialNumber, Ns2Protocol.PidForControllerType(controller.Type), controller.Type, controller.IsUSB, controller.IsThirdParty, true);
     }
 
     private void OnVirtualControllerErrored(ControllerIdentifier deviceIdentifier)
@@ -548,15 +597,27 @@ public class JoyconManager
         while (!writer.TryWrite(notification)) { }
     }
 
+    private static Joycon.ControllerType PairType(Joycon.ControllerType type)
+    {
+        return type switch
+        {
+            Joycon.ControllerType.JoyconLeft => Joycon.ControllerType.JoyconRight,
+            Joycon.ControllerType.Joycon2Left => Joycon.ControllerType.Joycon2Right,
+            Joycon.ControllerType.JoyconRight => Joycon.ControllerType.JoyconLeft,
+            Joycon.ControllerType.Joycon2Right => Joycon.ControllerType.Joycon2Left,
+            _ => type
+        };
+    }
+
     private int GetControllerIndex(Joycon.ControllerType type)
     {
         const int NbControllersMax = 8;
         var controllers = Controllers.OrderBy(c => c.PadId);
 
         // Get the ID next to a matching joycon that is not joined if possible
-        if (type == Joycon.ControllerType.JoyconLeft)
+        if (Ns2Protocol.IsLeftJoyconType(type))
         {
-            var rightJoycons = controllers.Where(c => c.Type == Joycon.ControllerType.JoyconRight && !c.IsJoined);
+            var rightJoycons = controllers.Where(c => c.Type == PairType(type) && !c.IsJoined);
             foreach (var joycon in rightJoycons)
             {
                 if (joycon.PadId < 1)
@@ -576,9 +637,9 @@ public class JoyconManager
                 }
             }
         }
-        else if (type == Joycon.ControllerType.JoyconRight)
+        else if (Ns2Protocol.IsRightJoyconType(type))
         {
-            var leftJoycons = controllers.Where(c => c.Type == Joycon.ControllerType.JoyconLeft && !c.IsJoined);
+            var leftJoycons = controllers.Where(c => c.Type == PairType(type) && !c.IsJoined);
             foreach (var joycon in leftJoycons)
             {
                 if (joycon.PadId >= NbControllersMax - 1)
@@ -613,31 +674,33 @@ public class JoyconManager
                 var prevController = controllers.FirstOrDefault(c => c.PadId == freeId - 1);
                 var nextController = controllers.FirstOrDefault(c => c.PadId == freeId + 1);
 
-                if (type == Joycon.ControllerType.JoyconLeft)
+                if (Ns2Protocol.IsLeftJoyconType(type))
                 {
+                    var pairType = PairType(type);
                     if (// Permit filling after a disconnect when using many controllers in the case : Left Joycon - empty - Right Joycon
-                        (prevController != null && prevController.Type == Joycon.ControllerType.JoyconLeft &&
-                         (nextController == null || nextController.Type != Joycon.ControllerType.JoyconRight || nextController.IsJoined)) ||
-                        (nextController != null && (nextController.Type != Joycon.ControllerType.JoyconRight || nextController.IsJoined)))
+                        (prevController != null && prevController.Type == type &&
+                         (nextController == null || nextController.Type != pairType || nextController.IsJoined)) ||
+                        (nextController != null && (nextController.Type != pairType || nextController.IsJoined)))
                     {
                         isValid = false;
                     }
                 }
-                else if (type == Joycon.ControllerType.JoyconRight)
+                else if (Ns2Protocol.IsRightJoyconType(type))
                 {
+                    var pairType = PairType(type);
                     if (freeId < 1 ||
                         // Permit filling after a disconnect when using many controllers in the case : Left Joycon - empty - Right Joycon
-                        (nextController != null && nextController.Type == Joycon.ControllerType.JoyconRight &&
-                         (prevController == null || prevController.Type != Joycon.ControllerType.JoyconLeft || prevController.IsJoined)) ||
-                        (prevController != null && (prevController.Type != Joycon.ControllerType.JoyconLeft || prevController.IsJoined)))
+                        (nextController != null && nextController.Type == type &&
+                         (prevController == null || prevController.Type != pairType || prevController.IsJoined)) ||
+                        (prevController != null && (prevController.Type != pairType || prevController.IsJoined)))
                     {
                         isValid = false;
                     }
                 }
                 else
                 {
-                    if ((prevController != null && prevController.Type == Joycon.ControllerType.JoyconLeft && !prevController.IsJoined) ||
-                        (nextController != null && nextController.Type == Joycon.ControllerType.JoyconRight && !nextController.IsJoined))
+                    if ((prevController != null && Ns2Protocol.IsLeftJoyconType(prevController.Type) && !prevController.IsJoined) ||
+                        (nextController != null && Ns2Protocol.IsRightJoyconType(nextController.Type) && !nextController.IsJoined))
                     {
                         isValid = false;
                     }
