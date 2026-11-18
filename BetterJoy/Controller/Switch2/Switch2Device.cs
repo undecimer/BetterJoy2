@@ -70,9 +70,10 @@ public class Switch2Device : IControllerDevice
     private bool _mouseActive;
     private int _prevMouseX;
     private int _prevMouseY;
-    private bool _prevMouseL;
-    private bool _prevMouseR;
-    private bool _prevMouseM;
+    private float _mouseAccumX;
+    private float _mouseAccumY;
+    private int _ownMouseFlags;
+    private int _prevCombinedMouseFlags;
 
     private CancellationTokenSource? _cts;
 
@@ -504,21 +505,24 @@ public class Switch2Device : IControllerDevice
         var active = input.MouseDistance != 0 && input.MouseDistance < 1000 && input.MouseRoughness < 4000;
         if (!active)
         {
-            // Controller lifted mid-click: release any held mouse buttons so
-            // the desktop isn't left dragging.
-            if (_prevMouseL)
+            // Controller lifted mid-click: release only the buttons no device
+            // of the joined pair still holds (the other Joy-Con may keep
+            // dragging on its own surface).
+            _ownMouseFlags = 0;
+            var combined = CombinedMouseFlags();
+            if ((combined & 1) == 0 && (_prevCombinedMouseFlags & 1) != 0)
             {
                 WindowsInput.Simulate.Events().Release(ButtonCode.Left).Invoke();
             }
-            if (_prevMouseR)
+            if ((combined & 2) == 0 && (_prevCombinedMouseFlags & 2) != 0)
             {
                 WindowsInput.Simulate.Events().Release(ButtonCode.Right).Invoke();
             }
-            if (_prevMouseM)
+            if ((combined & 4) == 0 && (_prevCombinedMouseFlags & 4) != 0)
             {
                 WindowsInput.Simulate.Events().Release(ButtonCode.Middle).Invoke();
             }
-            _prevMouseL = _prevMouseR = _prevMouseM = false;
+            _prevCombinedMouseFlags = combined;
             _mouseActive = false;
             return;
         }
@@ -531,31 +535,41 @@ public class Switch2Device : IControllerDevice
             {
                 // Optical counts are not gyro degrees: GyroMouseSensitivity
                 // (~1200) scales angular motion, so use a dedicated factor.
-                WindowsInput.Simulate.Events()
-                    .MoveBy(
-                        (int)(dx * OpticalMouseSensitivity),
-                        (int)(dy * OpticalMouseSensitivity))
-                    .Invoke();
+                // Keep the sub-pixel remainder so many small deltas aren't
+                // lost to truncation.
+                _mouseAccumX += dx * OpticalMouseSensitivity;
+                _mouseAccumY += dy * OpticalMouseSensitivity;
+                var moveX = (int)_mouseAccumX;
+                var moveY = (int)_mouseAccumY;
+                _mouseAccumX -= moveX;
+                _mouseAccumY -= moveY;
+                if (moveX != 0 || moveY != 0)
+                {
+                    WindowsInput.Simulate.Events().MoveBy(moveX, moveY).Invoke();
+                }
             }
 
-            var left = (mask & (Ns2Protocol.BtnZl | Ns2Protocol.BtnZr)) != 0;
-            var right = (mask & (Ns2Protocol.BtnL | Ns2Protocol.BtnR)) != 0;
-            var middle = (mask & (Ns2Protocol.BtnLStick | Ns2Protocol.BtnRStick)) != 0;
-            if (left != _prevMouseL)
+            // Mouse buttons are a pair-level state: while joined, a button
+            // stays held until no device reports it.
+            _ownMouseFlags =
+                ((mask & (Ns2Protocol.BtnZl | Ns2Protocol.BtnZr)) != 0 ? 1 : 0) |
+                ((mask & (Ns2Protocol.BtnL | Ns2Protocol.BtnR)) != 0 ? 2 : 0) |
+                ((mask & (Ns2Protocol.BtnLStick | Ns2Protocol.BtnRStick)) != 0 ? 4 : 0);
+            var combined = CombinedMouseFlags();
+
+            if ((combined & 1) != (_prevCombinedMouseFlags & 1))
             {
-                (left ? WindowsInput.Simulate.Events().Hold(ButtonCode.Left) : WindowsInput.Simulate.Events().Release(ButtonCode.Left)).Invoke();
+                ((combined & 1) != 0 ? WindowsInput.Simulate.Events().Hold(ButtonCode.Left) : WindowsInput.Simulate.Events().Release(ButtonCode.Left)).Invoke();
             }
-            if (right != _prevMouseR)
+            if ((combined & 2) != (_prevCombinedMouseFlags & 2))
             {
-                (right ? WindowsInput.Simulate.Events().Hold(ButtonCode.Right) : WindowsInput.Simulate.Events().Release(ButtonCode.Right)).Invoke();
+                ((combined & 2) != 0 ? WindowsInput.Simulate.Events().Hold(ButtonCode.Right) : WindowsInput.Simulate.Events().Release(ButtonCode.Right)).Invoke();
             }
-            if (middle != _prevMouseM)
+            if ((combined & 4) != (_prevCombinedMouseFlags & 4))
             {
-                (middle ? WindowsInput.Simulate.Events().Hold(ButtonCode.Middle) : WindowsInput.Simulate.Events().Release(ButtonCode.Middle)).Invoke();
+                ((combined & 4) != 0 ? WindowsInput.Simulate.Events().Hold(ButtonCode.Middle) : WindowsInput.Simulate.Events().Release(ButtonCode.Middle)).Invoke();
             }
-            _prevMouseL = left;
-            _prevMouseR = right;
-            _prevMouseM = middle;
+            _prevCombinedMouseFlags = combined;
 
             mask &= ~(Ns2Protocol.BtnZl | Ns2Protocol.BtnZr | Ns2Protocol.BtnL | Ns2Protocol.BtnR |
                       Ns2Protocol.BtnLStick | Ns2Protocol.BtnRStick);
@@ -564,6 +578,17 @@ public class Switch2Device : IControllerDevice
         _prevMouseX = input.MouseX;
         _prevMouseY = input.MouseY;
         _mouseActive = true;
+    }
+
+    private int CombinedMouseFlags()
+    {
+        var flags = _ownMouseFlags;
+        if (Other != null && Other != this)
+        {
+            flags |= Other._ownMouseFlags;
+        }
+
+        return flags;
     }
 
     private const float OpticalMouseSensitivity = 1.5f;
