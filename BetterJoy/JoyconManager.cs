@@ -306,17 +306,29 @@ public class JoyconManager
 
         var isUSB = info.BusType == BusType.USB;
 
-        // Switch 2 over HID is only real on a wired link: a BLE-connected pad
-        // also appears in hidapi as a Bluetooth HID node (Windows synthetic
-        // HID), and USB pads expose extra vendor interfaces (MI_01) that report
-        // a gamepad usage too. USB + interface 0 is the only real instance —
-        // everything else is handled by the BLE watcher or is an endpoint.
-        if (Ns2Protocol.IsSwitch2Type(type) && (!isUSB || info.InterfaceNumber > 0))
+        if (Ns2Protocol.IsSwitch2Type(type))
         {
-            return;
+            _logger?.Log(
+                $"Switch 2 HID enum: if={info.InterfaceNumber} usage={info.UsagePage:X4}/{info.Usage:X4} " +
+                $"bus={info.BusType} serial={info.SerialNumber ?? "-"} path={info.Path}");
+
+            // Switch 2 over HID is only real on a wired link: a BLE-connected
+            // pad also appears in hidapi as a Bluetooth HID node, and USB pads
+            // expose extra interfaces/collections that report a gamepad usage.
+            if (!isUSB || info.InterfaceNumber > 0)
+            {
+                return;
+            }
+
+            // Same physical pad enumerates several HID nodes — keep the first.
+            if (!string.IsNullOrEmpty(info.SerialNumber) && Controllers.Any(
+                c => Ns2Protocol.IsSwitch2Type(c.Type) && c.SerialNumber == info.SerialNumber))
+            {
+                return;
+            }
         }
 
-        OnDeviceConnected(info.Path, info.SerialNumber, info.ProductId, type, isUSB, thirdParty != null);
+        OnDeviceConnected(info.Path, info.SerialNumber ?? "", info.ProductId, type, isUSB, thirdParty != null);
     }
 
     private void OnDeviceConnected(string path, string serial, ushort productId, Joycon.ControllerType type, bool isUSB, bool isThirdparty, bool reconnect = false)
