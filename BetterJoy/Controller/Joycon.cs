@@ -23,7 +23,7 @@ using WindowsInput.Events;
 
 namespace BetterJoy.Controller;
 
-public class Joycon
+public class Joycon : IControllerDevice
 {
     public enum Button
     {
@@ -115,7 +115,7 @@ public class Joycon
     private readonly int _CommandLength;
     private readonly int _MixedComsLength; // when the buffer is used for both read and write to hid
 
-    public readonly ControllerConfig Config;
+    public ControllerConfig Config { get; }
 
     private static readonly byte[] _ledById = [0b0001, 0b0011, 0b0111, 0b1111, 0b1001, 0b0101, 0b1101, 0b0110];
 
@@ -153,7 +153,7 @@ public class Joycon
     private TwoAxisUShort _stick2Precal;
 
     private Motion _motion;
-    public bool ActiveGyro;
+    public bool ActiveGyro { get; set; }
 
     private bool _DumpedCalibration = false;
     private bool _motionCalibrated = false;
@@ -162,8 +162,8 @@ public class Joycon
     private StickLimitsCalibration _activeStick1 = new();
     private StickLimitsCalibration _activeStick2 = new();
 
-    public BatteryLevel Battery = BatteryLevel.Unknown;
-    public bool Charging = false;
+    public BatteryLevel Battery { get; private set; } = BatteryLevel.Unknown;
+    public bool Charging { get; private set; }
 
     private StickDeadZoneCalibration _deadZone;
     private StickDeadZoneCalibration _deadZone2;
@@ -178,31 +178,31 @@ public class Joycon
     private readonly HIDApi.Device _device;
     private bool _hasShaked;
 
-    public readonly bool IsThirdParty;
-    public readonly bool IsUSB;
+    public bool IsThirdParty { get; }
+    public bool IsUSB { get; }
     private long _lastStickDoubleClick = -1;
 
-    public OutputControllerDualShock4 OutDs4;
-    public OutputControllerXbox360 OutXbox;
+    public OutputControllerDualShock4 OutDs4 { get; }
+    public OutputControllerXbox360 OutXbox { get; }
     private readonly Lock _updateInputLock = new();
     private readonly Lock _ctsCommunicationsLock = new();
 
-    public int PacketCounter;
+    public int PacketCounter { get; set; }
 
     // For UdpServer
-    public readonly int PadId;
+    public int PadId { get; }
 
-    public MacAddress MacAddress = new();
-    public readonly string Path;
+    public MacAddress MacAddress { get; private set; } = new();
+    public string Path { get; }
 
     private Thread? _receiveReportsThread;
     private Thread? _sendCommandsThread;
 
     private readonly RumbleQueue _rumbles;
 
-    public readonly string SerialNumber;
+    public string SerialNumber { get; }
 
-    public string SerialOrMac;
+    public string SerialOrMac { get; private set; }
 
     private long _shakedTime;
 
@@ -228,16 +228,16 @@ public class Joycon
 
     private CancellationTokenSource? _ctsCommunications;
     public ulong Timestamp { get; private set; }
-    public readonly long TimestampCreation;
+    public long TimestampCreation { get; }
 
     private long _timestampActivity = Stopwatch.GetTimestamp();
 
     public ControllerType Type { get; private set; }
 
-    public EventHandler<StateChangedEventArgs>? StateChanged;
+    public event EventHandler<StateChangedEventArgs>? StateChanged;
 
-    public readonly ConcurrentList<MotionShort> CalibrationMotionDatas = [];
-    public readonly ConcurrentList<SticksData> CalibrationStickDatas = [];
+    public ConcurrentList<MotionShort> CalibrationMotionDatas { get; } = [];
+    public ConcurrentList<SticksData> CalibrationStickDatas { get; } = [];
     private bool _calibrateSticks = false;
     private bool _calibrateMotion = false;
 
@@ -319,6 +319,12 @@ public class Joycon
 
 
     public Joycon? Other;
+
+    IControllerDevice? IControllerDevice.Other
+    {
+        get => Other;
+        set => Other = (Joycon?)value;
+    }
 
     public bool SetLEDByPlayerNum(int id)
     {
@@ -543,7 +549,8 @@ public class Joycon
 
     private void GetMAC()
     {
-        Span<byte> macBytes = MacAddress;
+        var macAddress = MacAddress;
+        Span<byte> macBytes = macAddress;
 
         if (IsUSB)
         {
@@ -558,6 +565,7 @@ public class Joycon
 
             buf.Slice(4, macBytes.Length).CopyTo(macBytes);
             macBytes.Reverse();
+            MacAddress = macAddress;
             SerialOrMac = MacAddress.ToString();
             return;
         }
@@ -575,6 +583,8 @@ public class Joycon
         {
             Log("Cannot parse MAC address.", e, LogLevel.Debug);
         }
+
+        MacAddress = macAddress;
     }
 
     private void USBPairing()

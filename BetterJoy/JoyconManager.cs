@@ -19,7 +19,7 @@ public readonly struct ControllerIdentifier
     public readonly string Path;
     public readonly long TimestampCreation;
 
-    public ControllerIdentifier(Joycon controller)
+    public ControllerIdentifier(IControllerDevice controller)
     {
         Path = controller.Path;
         TimestampCreation = controller.TimestampCreation;
@@ -47,7 +47,7 @@ public class JoyconManager
     public bool Running { get; private set; } = false;
     private CancellationTokenSource? _ctsDevicesNotifications;
 
-    public ConcurrentList<Joycon> Controllers { get; } = []; // connected controllers
+    public ConcurrentList<IControllerDevice> Controllers { get; } = []; // connected controllers
 
     private readonly Channel<DeviceNotification> _channelDeviceNotifications;
     private Task? _devicesNotificationTask;
@@ -381,7 +381,7 @@ public class JoyconManager
         OnDeviceDisconnected(controller);
     }
 
-    private void OnDeviceDisconnected(Joycon? controller)
+    private void OnDeviceDisconnected(IControllerDevice? controller)
     {
         if (controller == null)
         {
@@ -430,7 +430,7 @@ public class JoyconManager
 
     private void OnDeviceDisconnected(ControllerIdentifier deviceIdentifier)
     {
-        Joycon? controller = GetControllerByPath(deviceIdentifier.Path);
+        IControllerDevice? controller = GetControllerByPath(deviceIdentifier.Path);
         if (controller == null ||
             controller.TimestampCreation != deviceIdentifier.TimestampCreation)
         {
@@ -448,7 +448,7 @@ public class JoyconManager
 
     private void OnDeviceErrored(ControllerIdentifier deviceIdentifier)
     {
-        Joycon? controller = GetControllerByPath(deviceIdentifier.Path);
+        IControllerDevice? controller = GetControllerByPath(deviceIdentifier.Path);
         if (controller == null ||
             controller.TimestampCreation != deviceIdentifier.TimestampCreation)
         {
@@ -467,7 +467,7 @@ public class JoyconManager
 
     private void OnVirtualControllerErrored(ControllerIdentifier deviceIdentifier)
     {
-        Joycon? controller = GetControllerByPath(deviceIdentifier.Path);
+        IControllerDevice? controller = GetControllerByPath(deviceIdentifier.Path);
         if (controller == null ||
             controller.TimestampCreation != deviceIdentifier.TimestampCreation)
         {
@@ -494,12 +494,12 @@ public class JoyconManager
         }
     }
 
-    private void ReconnectVirtualControllerDelayed(Joycon controller, int delayMs = 2000)
+    private void ReconnectVirtualControllerDelayed(IControllerDevice controller, int delayMs = 2000)
     {
         Task.Delay(delayMs).ContinueWith(_ => ReconnectVirtualController(controller));
     }
 
-    private void ReconnectVirtualController(Joycon controller)
+    private void ReconnectVirtualController(IControllerDevice controller)
     {
         var writer = _channelDeviceNotifications.Writer;
         var identifier = new ControllerIdentifier(controller);
@@ -509,7 +509,7 @@ public class JoyconManager
 
     private void OnControllerStateChanged(object? sender, Joycon.StateChangedEventArgs e)
     {
-        if (sender is not Joycon controller ||
+        if (sender is not IControllerDevice controller ||
             _ctsDevicesNotifications is not { IsCancellationRequested: false })
         {
             return;
@@ -527,12 +527,12 @@ public class JoyconManager
         }
     }
 
-    private void ReconnectControllerDelayed(Joycon controller, int delayMs = 2000)
+    private void ReconnectControllerDelayed(IControllerDevice controller, int delayMs = 2000)
     {
         Task.Delay(delayMs).ContinueWith(_ => ReconnectController(controller));
     }
 
-    private void ReconnectController(Joycon controller)
+    private void ReconnectController(IControllerDevice controller)
     {
         var writer = _channelDeviceNotifications.Writer;
         var identifier = new ControllerIdentifier(controller);
@@ -540,7 +540,7 @@ public class JoyconManager
         while (!writer.TryWrite(notification)) { }
     }
 
-    private void DisconnectController(Joycon controller)
+    private void DisconnectController(IControllerDevice controller)
     {
         var writer = _channelDeviceNotifications.Writer;
         var identifier = new ControllerIdentifier(controller);
@@ -659,7 +659,7 @@ public class JoyconManager
         }
     }
 
-    private Joycon? GetControllerByPath(string path)
+    private IControllerDevice? GetControllerByPath(string path)
     {
         foreach (var controller in Controllers)
         {
@@ -728,12 +728,14 @@ public class JoyconManager
         HIDApi.Manager.Exit();
     }
 
-    private static bool TryJoinJoycon(Joycon controller, Joycon otherController)
+    private static bool TryJoinJoycon(IControllerDevice controller, IControllerDevice otherController)
     {
         if (!otherController.IsJoycon ||
             otherController.Other != null || // already associated
             controller.IsLeft == otherController.IsLeft ||
             controller == otherController ||
+            // only join controllers of the same generation (Switch 1 with Switch 1, Switch 2 with Switch 2)
+            controller.GetType() != otherController.GetType() ||
             otherController.State < Joycon.Status.Attached)
         {
             return false;
@@ -751,7 +753,7 @@ public class JoyconManager
         return true;
     }
 
-    public bool JoinJoycon(Joycon controller, bool joinSelf = false)
+    public bool JoinJoycon(IControllerDevice controller, bool joinSelf = false)
     {
         if (!controller.IsJoycon)
         {
@@ -801,7 +803,7 @@ public class JoyconManager
         return false;
     }
 
-    public bool SplitJoycon(Joycon controller, bool keep = true)
+    public bool SplitJoycon(IControllerDevice controller, bool keep = true)
     {
         if (!controller.IsJoycon)
         {
@@ -852,7 +854,7 @@ public class JoyconManager
         return true;
     }
 
-    public bool JoinOrSplitJoycon(Joycon controller)
+    public bool JoinOrSplitJoycon(IControllerDevice controller)
     {
         bool change = false;
 
@@ -873,7 +875,7 @@ public class JoyconManager
             }
             else
             {
-                Joycon other = controller.Other;
+                IControllerDevice other = controller.Other;
 
                 if (SplitJoycon(controller))
                 {

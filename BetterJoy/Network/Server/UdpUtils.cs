@@ -6,7 +6,7 @@ using System.IO.Hashing;
 namespace BetterJoy.Network.Server;
 public static class UdpUtils
 {
-    public static ControllerBattery GetBattery(Joycon controller)
+    public static ControllerBattery GetBattery(IControllerDevice controller)
     {
         if (controller.Charging)
         {

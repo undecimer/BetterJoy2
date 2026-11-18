@@ -38,7 +38,7 @@ public class UdpServer
     public bool HasClients => _hasClients;
 
     private readonly Dictionary<SocketAddress, ClientRequestTimes> _clients = [];
-    private readonly IList<Joycon> _controllers;
+    private readonly IList<IControllerDevice> _controllers;
 
     [MemberNotNullWhen(returnValue: true,
         nameof(_ctsTransfers),
@@ -59,7 +59,7 @@ public class UdpServer
 
     private readonly ILogger? _logger;
 
-    public UdpServer(ILogger? logger, IList<Joycon> p)
+    public UdpServer(ILogger? logger, IList<IControllerDevice> p)
     {
         _controllers = p;
         _logger = logger;
@@ -307,7 +307,7 @@ public class UdpServer
                     }
                     case PendingReplyListPorts listPortsReply:
                     {
-                        var controllersSafe = new List<Joycon>(_controllers);
+                        var controllersSafe = new List<IControllerDevice>(_controllers);
 
                         foreach (var padRequested in listPortsReply.PadsRequested)
                         {
@@ -575,7 +575,7 @@ public class UdpServer
         UpdatePacketCRC(outputData);
     }
 
-    private int MakeReplyListPortPacket(Joycon controller, Span<byte> outputData)
+    private int MakeReplyListPortPacket(IControllerDevice controller, Span<byte> outputData)
     {
         outputData.Clear();
 
@@ -589,7 +589,8 @@ public class UdpServer
         outputData[outIdx++] = (byte)ControllerModel.DS4;
         outputData[outIdx++] = (byte)(controller.IsUSB ? ControllerConnection.USB : ControllerConnection.Bluetooth);
 
-        ReadOnlySpan<byte> macAddress = controller.MacAddress;
+        var mac = controller.MacAddress;
+        ReadOnlySpan<byte> macAddress = mac;
         if (macAddress.Length == 6)
         {
             macAddress.CopyTo(outputData.Slice(outIdx, macAddress.Length));

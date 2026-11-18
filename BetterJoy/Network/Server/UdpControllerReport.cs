@@ -19,7 +19,7 @@ public class UdpControllerReport
 
     public readonly Motion[] Motion = new Motion[3];
 
-    public UdpControllerReport(Joycon controller, ulong deltaPackets = DefaultDeltaPackets)
+    public UdpControllerReport(IControllerDevice controller, ulong deltaPackets = DefaultDeltaPackets)
     {
         Timestamp = controller.Timestamp;
         PacketCounter = controller.PacketCounter;
@@ -30,7 +30,7 @@ public class UdpControllerReport
         Battery = UdpUtils.GetBattery(controller);
     }
 
-    public void AddInput(Joycon controller)
+    public void AddInput(IControllerDevice controller)
     {
         Input = controller.MapToDualShock4Input();
 
@@ -39,7 +39,7 @@ public class UdpControllerReport
         Input.ThumbRightY = (byte)(byte.MaxValue - Input.ThumbRightY);
     }
 
-    public void AddMotion(Joycon controller, int packetNumber)
+    public void AddMotion(IControllerDevice controller, int packetNumber)
     {
         Motion[packetNumber] = controller.GetMotion();
     }
