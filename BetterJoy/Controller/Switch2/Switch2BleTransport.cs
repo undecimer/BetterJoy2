@@ -133,7 +133,8 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
             .Where(c => c.CharacteristicProperties.HasFlag(GattCharacteristicProperties.Notify))
             .OrderBy(c => c.AttributeHandle))
         {
-            var handler = ReferenceEquals(c, _responseChar) ? OnCommandResponse : OnAnyNotify;
+            TypedEventHandler<GattCharacteristic, GattValueChangedEventArgs> handler =
+                ReferenceEquals(c, _responseChar) ? OnCommandResponse : OnAnyNotify;
             await SubscribeAsync(c, handler, ct);
             Log($"Subscribed notify handle 0x{c.AttributeHandle:X4} ({c.Uuid}).");
         }
