@@ -313,9 +313,11 @@ public class JoyconManager
                 $"bus={info.BusType} serial={info.SerialNumber ?? "-"} path={info.Path}");
 
             // Switch 2 over HID is only real on a wired link: a BLE-connected
-            // pad also appears in hidapi as a Bluetooth HID node, and USB pads
-            // expose extra interfaces/collections that report a gamepad usage.
-            if (!isUSB || info.InterfaceNumber > 0)
+            // pad also appears in hidapi as a Bluetooth HID node ("IG_XX" in the
+            // path; hidapi's BusType misreports it as USB on Win11), and USB
+            // pads expose extra interfaces/collections that report a gamepad
+            // usage. USB + interface 0 is the only real instance.
+            if (!isUSB || info.InterfaceNumber > 0 || info.Path.Contains("&IG_"))
             {
                 return;
             }
