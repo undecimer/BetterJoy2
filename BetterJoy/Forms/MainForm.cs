@@ -402,7 +402,7 @@ public partial class MainForm : Form
         console.AppendText($"{message} {e.Display()}{Environment.NewLine}");
     }
 
-    private async Task LocateController(Joycon controller)
+    private async Task LocateController(IControllerDevice controller)
     {
         SetLocate(false);
 
@@ -415,7 +415,7 @@ public partial class MainForm : Form
     {
         var button = sender as Button;
 
-        if (button?.Tag is not Joycon controller)
+        if (button?.Tag is not IControllerDevice controller)
         {
             return;
         }
@@ -723,13 +723,13 @@ public partial class MainForm : Form
         }
     }
 
-    private List<Joycon> GetActiveControllers()
+    private List<IControllerDevice> GetActiveControllers()
     {
-        var controllers = new List<Joycon>();
+        var controllers = new List<IControllerDevice>();
 
         foreach (var button in _con)
         {
-            if (button is { Enabled: true, Tag: Joycon controller })
+            if (button is { Enabled: true, Tag: IControllerDevice controller })
             {
                 controllers.Add(controller);
             }
@@ -738,7 +738,7 @@ public partial class MainForm : Form
         return controllers;
     }
 
-    private void StartCalibrate(Joycon controller)
+    private void StartCalibrate(IControllerDevice controller)
     {
         SetCalibrateButtonText();
         btn_calibrate.Enabled = false;
@@ -769,14 +769,14 @@ public partial class MainForm : Form
         mapForm.ShowDialog(this);
     }
 
-    private void ShowReassignDialog(Joycon controller)
+    private void ShowReassignDialog(IControllerDevice controller)
     {
         throw new NotImplementedException();
     }
 
     private void CountDownMotion(object? sender, EventArgs? e)
     {
-        if (_countDown?.Tag is not Joycon controller)
+        if (_countDown?.Tag is not IControllerDevice controller)
         {
             return;
         }
@@ -810,7 +810,7 @@ public partial class MainForm : Form
 
     private void CalcMotionData(object? sender, EventArgs e)
     {
-        if (_countDown?.Tag is not Joycon controller)
+        if (_countDown?.Tag is not IControllerDevice controller)
         {
             return;
         }
@@ -884,7 +884,7 @@ public partial class MainForm : Form
 
     private void CountDownSticksCenter(object? sender, EventArgs? e)
     {
-        if (_countDown?.Tag is not Joycon controller)
+        if (_countDown?.Tag is not IControllerDevice controller)
         {
             return;
         }
@@ -919,7 +919,7 @@ public partial class MainForm : Form
 
     private void CalcSticksCenterData(object? sender, EventArgs e)
     {
-        if (_countDown?.Tag is not Joycon controller)
+        if (_countDown?.Tag is not IControllerDevice controller)
         {
             return;
         }
@@ -987,7 +987,7 @@ public partial class MainForm : Form
 
     private void CountDownSticksMinMax(object? sender, EventArgs? e)
     {
-        if (_countDown?.Tag is not Joycon controller)
+        if (_countDown?.Tag is not IControllerDevice controller)
         {
             return;
         }
@@ -1022,7 +1022,7 @@ public partial class MainForm : Form
 
     private void CalcSticksMinMaxData(object? sender, EventArgs e)
     {
-        if (_countDown?.Tag is not Joycon controller)
+        if (_countDown?.Tag is not IControllerDevice controller)
         {
             return;
         }
@@ -1087,13 +1087,13 @@ public partial class MainForm : Form
         }
     }
 
-    private static void ClearCalibrateDatas(Joycon controller)
+    private static void ClearCalibrateDatas(IControllerDevice controller)
     {
         controller.StopMotionCalibration(true);
         controller.StopSticksCalibration(true);
     }
 
-    private void CancelCalibrate(Joycon controller, bool disconnected = false)
+    private void CancelCalibrate(IControllerDevice controller, bool disconnected = false)
     {
         if (disconnected)
         {
@@ -1217,11 +1217,11 @@ public partial class MainForm : Form
         notifyIcon.ShowBalloonTip(0);
     }
 
-    public void SetBatteryColor(Joycon controller, BatteryLevel batteryLevel)
+    public void SetBatteryColor(IControllerDevice controller, BatteryLevel batteryLevel)
     {
         if (InvokeRequired)
         {
-            BeginInvoke(new Action<Joycon, BatteryLevel>(SetBatteryColor), controller, batteryLevel);
+            BeginInvoke(new Action<IControllerDevice, BatteryLevel>(SetBatteryColor), controller, batteryLevel);
             return;
         }
 
@@ -1243,11 +1243,11 @@ public partial class MainForm : Form
         }
     }
 
-    public void SetCharging(Joycon controller, bool charging)
+    public void SetCharging(IControllerDevice controller, bool charging)
     {
         if (InvokeRequired)
         {
-            BeginInvoke(new Action<Joycon, bool>(SetCharging), controller, charging);
+            BeginInvoke(new Action<IControllerDevice, bool>(SetCharging), controller, charging);
             return;
         }
 
@@ -1321,11 +1321,11 @@ public partial class MainForm : Form
         oldImage?.Dispose();
     }
 
-    public void AddController(Joycon controller)
+    public void AddController(IControllerDevice controller)
     {
         if (InvokeRequired)
         {
-            BeginInvoke(new Action<Joycon>(AddController), controller);
+            BeginInvoke(new Action<IControllerDevice>(AddController), controller);
             return;
         }
 
@@ -1347,11 +1347,11 @@ public partial class MainForm : Form
         SetControllerImage(button, controller.Type);
     }
 
-    public void RemoveController(Joycon controller)
+    public void RemoveController(IControllerDevice controller)
     {
         if (InvokeRequired)
         {
-            BeginInvoke(new Action<Joycon>(RemoveController), controller);
+            BeginInvoke(new Action<IControllerDevice>(RemoveController), controller);
             return;
         }
 
@@ -1380,11 +1380,11 @@ public partial class MainForm : Form
         }
     }
 
-    public void JoinJoycon(Joycon controller, Joycon other)
+    public void JoinJoycon(IControllerDevice controller, IControllerDevice other)
     {
         if (InvokeRequired)
         {
-            BeginInvoke(new Action<Joycon, Joycon>(JoinJoycon), controller, other);
+            BeginInvoke(new Action<IControllerDevice, IControllerDevice>(JoinJoycon), controller, other);
             return;
         }
 
@@ -1400,11 +1400,11 @@ public partial class MainForm : Form
         }
     }
 
-    public void SplitJoycon(Joycon controller, Joycon other)
+    public void SplitJoycon(IControllerDevice controller, IControllerDevice other)
     {
         if (InvokeRequired)
         {
-            BeginInvoke(new Action<Joycon, Joycon>(SplitJoycon), controller, other);
+            BeginInvoke(new Action<IControllerDevice, IControllerDevice>(SplitJoycon), controller, other);
             return;
         }
 
