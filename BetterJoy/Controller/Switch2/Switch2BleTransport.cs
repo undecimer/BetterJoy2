@@ -126,10 +126,17 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
 
         _device.ConnectionStatusChanged += OnConnectionStatusChanged;
 
-        await SubscribeAsync(_responseChar, OnCommandResponse, ct);
-        Log("Subscribed to command response characteristic.");
-        await SubscribeAsync(_inputChar, OnInputReport, ct);
-        Log("Subscribed to input report characteristic.");
+        // Subscribe to EVERY notify characteristic: some replies (e.g. Pro 2's
+        // 0A:08) may arrive on a different characteristic than the canonical
+        // response one — routing is by pending command id, not by channel.
+        foreach (var c in chars
+            .Where(c => c.CharacteristicProperties.HasFlag(GattCharacteristicProperties.Notify))
+            .OrderBy(c => c.AttributeHandle))
+        {
+            var handler = ReferenceEquals(c, _responseChar) ? OnCommandResponse : OnAnyNotify;
+            await SubscribeAsync(c, handler, ct);
+            Log($"Subscribed notify handle 0x{c.AttributeHandle:X4} ({c.Uuid}).");
+        }
 
         // Unpaired advertisement link: bond to the host first (Switch2Connect's
         // pair()). Pro 2 answers query commands unbonded but goes silent on the
@@ -256,14 +263,26 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         characteristic.ValueChanged += handler;
     }
 
-    private void OnInputReport(GattCharacteristic sender, GattValueChangedEventArgs args)
+    private void OnAnyNotify(GattCharacteristic sender, GattValueChangedEventArgs args)
     {
         var reader = DataReader.FromBuffer(args.CharacteristicValue);
         var data = new byte[args.CharacteristicValue.Length];
         reader.ReadBytes(data);
+        if (data.Length == 0)
+        {
+            return;
+        }
+
+        // A command reply arriving on a non-response characteristic.
+        if (_pendingCommands.TryRemove(data[0], out var tcs))
+        {
+            Log($"Reply for cmd {data[0]:X2} arrived on handle 0x{sender.AttributeHandle:X4}.");
+            tcs.TrySetResult(data);
+            return;
+        }
 
         // 0xA1 = optional HID-over-GATT prefix; 0x21 = subcommand reply.
-        if (data.Length == 0 || data[0] == 0x21)
+        if (data[0] == 0x21)
         {
             return;
         }
@@ -318,8 +337,14 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
             await _commandLock.WaitAsync(ct);
 
             var frame = Ns2Protocol.BuildCommand(command, subcommand, data.Span, usb: false);
+            // Bleak's write_gatt_char prefers WriteWithResponse when the
+            // characteristic supports it — match that (some controllers drop
+            // WriteWithoutResponse frames mid-handshake).
+            var writeOption = _commandChar.CharacteristicProperties.HasFlag(GattCharacteristicProperties.Write)
+                ? GattWriteOption.WriteWithResponse
+                : GattWriteOption.WriteWithoutResponse;
             var status = await _commandChar.WriteValueWithResultAsync(
-                frame.AsBuffer(), GattWriteOption.WriteWithoutResponse);
+                frame.AsBuffer(), writeOption);
             if (status.Status != GattCommunicationStatus.Success)
             {
                 _pendingCommands.TryRemove(command, out _);
@@ -401,7 +426,7 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
 
             try
             {
-                c.ValueChanged -= OnInputReport;
+                c.ValueChanged -= OnAnyNotify;
                 c.ValueChanged -= OnCommandResponse;
                 await c.WriteClientCharacteristicConfigurationDescriptorAsync(
                     GattClientCharacteristicConfigurationDescriptorValue.None);
