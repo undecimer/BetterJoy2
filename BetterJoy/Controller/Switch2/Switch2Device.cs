@@ -154,15 +154,27 @@ public class Switch2Device : IControllerDevice
         SerialOrMac = serial;
 
         var mac = transport.Mac;
+        var macAddress = MacAddress;
         if (mac.Length >= 6)
         {
-            var macAddress = MacAddress;
             for (var i = 0; i < 6; i++)
             {
                 macAddress[i] = mac[i];
             }
             MacAddress = macAddress;
             SerialOrMac = MacAddress.ToString();
+        }
+        else
+        {
+            // USB transport has no BLE MAC; synthesize a deterministic non-zero MAC
+            // so Cemuhook DSU clients (e.g. Cemu) see a valid controller address.
+            macAddress[0] = 0x05;
+            macAddress[1] = 0x7E;
+            macAddress[2] = (byte)(_transport.ProductId >> 8);
+            macAddress[3] = (byte)_transport.ProductId;
+            macAddress[4] = 0x00;
+            macAddress[5] = (byte)(padId + 1);
+            MacAddress = macAddress;
         }
 
         OutXbox = new OutputControllerXbox360(Ns2Protocol.VendorId, _transport.ProductId);
@@ -716,21 +728,44 @@ public class Switch2Device : IControllerDevice
         const float accelPerG = 4096f;
         var gyroPerDps = IsPro || IsGameCube ? 14.2857f : 16.384f;
 
-        // Gyroscope in deg/s, accelerometer in g — same convention as Joycon
-        // and what the DSU/Cemuhook packet expects. Only the gyro gets a user
-        // offset (rest-position median): the accel median embeds gravity, so
-        // subtracting it would remove the gravity reference the orientation
-        // filter and DSU clients need.
+        // Gyroscope in deg/s, accelerometer in g — converted from Switch 2 raw
+        // IMU frame into the orientation expected by MadgwickAHRS and UdpServer
+        // (Switch2Connect virtual_controller.py canonical/DS4 mapping).
         var nG = _motionCalibrated ? _motionNeutralGyro : ThreeAxisShort.Zero;
+        var gx = (input.GyroX - nG.X) / gyroPerDps;
+        var gy = (input.GyroY - nG.Y) / gyroPerDps;
+        var gz = (input.GyroZ - nG.Z) / gyroPerDps;
+        var ax = input.AccelX / accelPerG;
+        var ay = input.AccelY / accelPerG;
+        var az = input.AccelZ / accelPerG;
+
+        var baseGyro = new Vector3(gx, -gy, -gz);
+        var baseAccel = new Vector3(-ax, -ay, -az);
+
+        Vector3 emuGyro;
+        Vector3 emuAccel;
+        if (IsJoycon && Other == null)
+        {
+            if (_isLeft)
+            {
+                emuGyro = new Vector3(baseGyro.Y, -baseGyro.X, baseGyro.Z);
+                emuAccel = new Vector3(baseAccel.Y, -baseAccel.X, baseAccel.Z);
+            }
+            else
+            {
+                emuGyro = new Vector3(-baseGyro.Y, baseGyro.X, baseGyro.Z);
+                emuAccel = new Vector3(-baseAccel.Y, baseAccel.X, baseAccel.Z);
+            }
+        }
+        else
+        {
+            emuGyro = baseGyro;
+            emuAccel = baseAccel;
+        }
+
         _motion = new Motion(
-            new Vector3(
-                (input.GyroX - nG.X) / gyroPerDps,
-                (input.GyroY - nG.Y) / gyroPerDps,
-                (input.GyroZ - nG.Z) / gyroPerDps),
-            new Vector3(
-                input.AccelX / accelPerG,
-                input.AccelY / accelPerG,
-                input.AccelZ / accelPerG));
+            new Vector3(-emuGyro.Y, emuGyro.X, emuGyro.Z),
+            new Vector3(-emuAccel.Y, emuAccel.X, -emuAccel.Z));
 
         // Feed the Madgwick filter (gyro in rad/s, accel in g). Timestamp is
         // in microseconds, so dt must be divided by 1e6, not TicksPerSecond.
