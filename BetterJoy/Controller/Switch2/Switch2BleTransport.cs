@@ -29,6 +29,7 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
     private readonly byte[] _hostMac;
     private readonly SemaphoreSlim _commandLock = new(1, 1);
     private readonly ConcurrentDictionary<byte, TaskCompletionSource<byte[]>> _pendingCommands = new();
+    private readonly HashSet<ushort> _seenNotifyHandles = [];
 
     private GattCharacteristic? _inputChar;
     private GattCharacteristic? _commandChar;
@@ -279,6 +280,18 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         {
             Log($"Reply for cmd {data[0]:X2} arrived on handle 0x{sender.AttributeHandle:X4}.");
             tcs.TrySetResult(data);
+            return;
+        }
+
+        // Only the designated input characteristic carries gamepad reports.
+        // Other notify channels (…fdE aux stream, status chars) would decode as
+        // garbage input — log the first packet per handle, then drop them.
+        if (!ReferenceEquals(sender, _inputChar))
+        {
+            if (_seenNotifyHandles.Add(sender.AttributeHandle))
+            {
+                Log($"Notify on aux handle 0x{sender.AttributeHandle:X4}: {Convert.ToHexString(data[..Math.Min(8, data.Length)])} ({data.Length}B) — dropped.");
+            }
             return;
         }
 
