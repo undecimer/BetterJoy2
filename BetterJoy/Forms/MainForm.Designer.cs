@@ -423,7 +423,7 @@
             MinimumSize = new System.Drawing.Size(0, 430);
             Name = "MainForm";
             StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
-            Text = "BetterJoy LTS";
+            Text = "BetterJoy2";
             FormClosing += MainForm_FormClosing;
             Load += MainForm_Load;
             Resize += MainForm_Resize;

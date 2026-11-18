@@ -11,6 +11,7 @@ public class ControllerConfig : Config
     public bool EnableRumble = true;
     public bool ShowAsXInput = true;
     public bool ShowAsDs4 = false;
+    public bool EnablePro2Audio = true;
     public float StickLeftDeadzone = 0.15f;
     public float StickRightDeadzone = 0.15f;
     public float StickLeftRange = 0.90f;
@@ -52,6 +53,7 @@ public class ControllerConfig : Config
         EnableRumble = config.EnableRumble;
         ShowAsXInput = config.ShowAsXInput;
         ShowAsDs4 = config.ShowAsDs4;
+        EnablePro2Audio = config.EnablePro2Audio;
         StickLeftDeadzone = config.StickLeftDeadzone;
         StickRightDeadzone = config.StickRightDeadzone;
         StickLeftRange = config.StickLeftRange;
@@ -92,6 +94,7 @@ public class ControllerConfig : Config
         TryUpdateSetting("EnableRumble", ref EnableRumble);
         TryUpdateSetting("ShowAsXInput", ref ShowAsXInput);
         TryUpdateSetting("ShowAsDS4", ref ShowAsDs4);
+        TryUpdateSetting("EnablePro2Audio", ref EnablePro2Audio);
         TryUpdateSetting("StickLeftDeadzone", ref StickLeftDeadzone);
         TryUpdateSetting("StickRightDeadzone", ref StickRightDeadzone);
         TryUpdateSetting("StickLeftRange", ref StickLeftRange);

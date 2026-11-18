@@ -36,6 +36,22 @@ internal static class Ns2Protocol
     public static readonly Guid RumbleCharJoycon2Left = new("289326cb-a471-485d-a8f4-240c14f18241");
     public static readonly Guid RumbleCharPro2 = new("cc483f51-9258-427d-a939-630c31f72b05");
 
+    // Pro Controller 2 BLE Headset Audio characteristics (firmware 2.x+)
+    public static readonly Guid AudioOutputCharPro2 = new("cc483f51-9258-427d-a939-630c31f72b06");
+    public static readonly Guid AudioInputCharPro2 = new("7492866c-ec3e-4619-8258-32755ffcc0f9");
+    public static readonly Guid AudioCommandCharPro2 = new("3dacbc7e-6955-40b5-8eaf-6f9809e8b380");
+
+    public const int AudioSampleRate = 48000;
+    public const int AudioChannels = 2;
+    public const int AudioFrameSamplesPerChannel = 960; // 20 ms @ 48 kHz
+    public const int AudioOpusFrameBytes = 240;         // 96 kbps CBR, 20 ms (TOC 0xFC + 239B CELT)
+    public const int AudioBleChunkBytes = 120;          // 0x78 bytes per GATT write (2 writes per 20 ms frame)
+    public const int AudioExtendedReportLen = 0x70;     // 112-byte report on AudioInputCharPro2
+
+    // Written to AudioCommandCharPro2 before streaming Opus packets to AudioOutputCharPro2
+    public static readonly byte[] BleAudioSetupOne = [0x00, 0x18, 0x91, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x07];
+    public static readonly byte[] BleAudioSetupTwo = [0x00, 0x17, 0x91, 0x01, 0x02, 0x00, 0x07, 0x00, 0x00, 0x80, 0xBB, 0x00, 0x00, 0x02, 0xF0, 0x00];
+
     // SPI/flash memory addresses for factory stick calibration (read via command 02:04)
     public const uint AddrStick1FactoryCal = 0x0130A8;
     public const uint AddrStick2FactoryCal = 0x0130E8;
@@ -337,6 +353,42 @@ internal static class Ns2Protocol
         ];
     }
 
+    /// <summary>
+    /// Audio initialization commands for Pro Controller 2 over USB (firmware 2.x+ UAC1 DAC).
+    /// Non-fatal on factory 1.x firmware where DSP audio is not active.
+    /// </summary>
+    public static IReadOnlyList<(byte Command, byte Sub, byte[] Data)> GetPro2UsbAudioInitSequence()
+    {
+        return
+        [
+            (0x18, 0x01, []),                                         // query audio DSP params
+            (0x18, 0x03, [0x07]),                                     // enable audio routing
+            (0x17, 0x02, [0x80, 0xBB, 0x00, 0x00, 0x02, 0xF0, 0x00]), // configure 48 kHz stereo
+        ];
+    }
+
+    public static bool IsHeadsetConnectedFromRawState(byte rawState)
+    {
+        return (rawState & 0x07) is 0x05 or 0x07;
+    }
+
+    /// <summary>
+    /// Splits a 240-byte Opus/CELT frame into the two 123-byte GATT writes required
+    /// by Pro Controller 2 speaker streaming (stream 0x04 first half, stream 0x02 second half).
+    /// </summary>
+    public static void BuildBleAudioChunks(ReadOnlySpan<byte> opus240, Span<byte> chunk1, Span<byte> chunk2)
+    {
+        chunk1[0] = 0x00;
+        chunk1[1] = 0x04;
+        chunk1[2] = AudioBleChunkBytes;
+        opus240.Slice(0, AudioBleChunkBytes).CopyTo(chunk1.Slice(3, AudioBleChunkBytes));
+
+        chunk2[0] = 0x00;
+        chunk2[1] = 0x02;
+        chunk2[2] = AudioBleChunkBytes;
+        opus240.Slice(AudioBleChunkBytes, AudioBleChunkBytes).CopyTo(chunk2.Slice(3, AudioBleChunkBytes));
+    }
+
     // Player LED patterns indexed by pad id (joycon2pc map)
     private static readonly byte[] _playerLedPatterns = [0x01, 0x02, 0x04, 0x08, 0x03, 0x06, 0x0C, 0x0F];
 
@@ -429,10 +481,10 @@ internal static class Ns2Protocol
             return false;
         }
 
-        // USB reports carry a leading report ID byte; BLE notifications do
-        // not, so there report[0] is just the packet counter and may hold any
-        // value (a 63-byte payload must never be re-interpreted as an ID).
-        if (report.Length > StandardReportLen)
+        // USB reports carry a leading report ID byte (64 B = 1 B ID + 63 B payload);
+        // BLE notifications do not, so report[0] there is just the packet counter
+        // and must never be stripped.
+        if (report.Length == StandardReportLen + 1)
         {
             if (report[0] is 0x21 or 0x02)
             {
@@ -448,6 +500,11 @@ internal static class Ns2Protocol
         if (gameCubeLayout)
         {
             return TryDecodeGameCubeReport(report, ref input);
+        }
+
+        if (report.Length >= AudioExtendedReportLen)
+        {
+            return TryDecodeExtendedPro2AudioReport(report, out input);
         }
 
         if (report.Length < 60)
@@ -472,6 +529,65 @@ internal static class Ns2Protocol
         input.GyroY = BitConverter.ToInt16(report.Slice(56, 2));
         input.GyroZ = BitConverter.ToInt16(report.Slice(58, 2));
         input.HasMotion = true;
+
+        SanitizeSticks(ref input);
+
+        return true;
+    }
+
+    /// <summary>
+    /// Decodes the 112-byte extended headset/input report (characteristic 0x002E / handle 0x002D)
+    /// used as a fallback if standard 0x05 notifications pause while audio is active.
+    /// </summary>
+    public static bool TryDecodeExtendedPro2AudioReport(ReadOnlySpan<byte> report, out Ns2Input input)
+    {
+        input = default;
+
+        if (report.Length < AudioExtendedReportLen)
+        {
+            return false;
+        }
+
+        var b0 = report[2];
+        var b1 = report[3];
+        var b2 = report[4];
+        uint buttons = 0;
+
+        if ((b0 & 0x01) != 0) buttons |= BtnB;
+        if ((b0 & 0x02) != 0) buttons |= BtnA;
+        if ((b0 & 0x04) != 0) buttons |= BtnY;
+        if ((b0 & 0x08) != 0) buttons |= BtnX;
+        if ((b0 & 0x10) != 0) buttons |= BtnR;
+        if ((b0 & 0x20) != 0) buttons |= BtnZr;
+        if ((b0 & 0x40) != 0) buttons |= BtnPlus;
+        if ((b0 & 0x80) != 0) buttons |= BtnRStick;
+
+        if ((b1 & 0x01) != 0) buttons |= BtnDown;
+        if ((b1 & 0x02) != 0) buttons |= BtnRight;
+        if ((b1 & 0x04) != 0) buttons |= BtnLeft;
+        if ((b1 & 0x08) != 0) buttons |= BtnUp;
+        if ((b1 & 0x10) != 0) buttons |= BtnL;
+        if ((b1 & 0x20) != 0) buttons |= BtnZl;
+        if ((b1 & 0x40) != 0) buttons |= BtnMinus;
+        if ((b1 & 0x80) != 0) buttons |= BtnLStick;
+
+        if ((b2 & 0x01) != 0) buttons |= BtnHome;
+        if ((b2 & 0x02) != 0) buttons |= BtnCapture;
+        if ((b2 & 0x04) != 0) buttons |= BtnGr;
+        if ((b2 & 0x08) != 0) buttons |= BtnGl;
+        if ((b2 & 0x10) != 0) buttons |= BtnC;
+
+        if (IsHeadsetConnectedFromRawState(report[0x0D]))
+        {
+            buttons |= BtnHeadset;
+        }
+
+        input.Buttons = buttons;
+        input.LeftX = Unpack12X(report, 5);
+        input.LeftY = Unpack12Y(report, 5);
+        input.RightX = Unpack12X(report, 8);
+        input.RightY = Unpack12Y(report, 8);
+        input.HasMotion = false;
 
         SanitizeSticks(ref input);
 

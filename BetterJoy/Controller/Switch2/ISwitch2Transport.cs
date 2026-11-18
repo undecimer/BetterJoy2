@@ -16,6 +16,21 @@ internal interface ISwitch2Transport : IDisposable
     /// <summary>The link dropped (BLE disconnect or USB removal).</summary>
     event EventHandler? LinkDropped;
 
+    /// <summary>Raised when the 3.5 mm headset jack plug state changes (Pro Controller 2).</summary>
+    event EventHandler<bool>? HeadsetStateChanged;
+
+    /// <summary>True when connected over USB; false for BLE.</summary>
+    bool IsUsb { get; }
+
+    /// <summary>True when BLE headset audio characteristics are available on this link.</summary>
+    bool SupportsBleAudio { get; }
+
+    /// <summary>True when a dedicated jack-state report is active on this link.</summary>
+    bool HasHeadsetJackDetect { get; }
+
+    /// <summary>True when a 3.5 mm plug is reported in the Pro Controller 2 jack.</summary>
+    bool IsHeadsetConnected { get; }
+
     /// <summary>USB product ID or BLE PnP product ID of the controller.</summary>
     ushort ProductId { get; }
 
@@ -44,6 +59,12 @@ internal interface ISwitch2Transport : IDisposable
 
     /// <summary>Sets the player LED pattern.</summary>
     Task SetPlayerLedAsync(int padId, CancellationToken ct);
+
+    /// <summary>Writes an audio control/setup packet to the Pro 2 audio command characteristic.</summary>
+    Task<bool> WriteBleAudioCommandAsync(byte[] payload, CancellationToken ct);
+
+    /// <summary>Writes a 123-byte Opus chunk packet to the Pro 2 audio output characteristic.</summary>
+    Task<bool> WriteBleAudioOutputAsync(byte[] payload, CancellationToken ct);
 
     /// <summary>Stops the transport and releases the link.</summary>
     Task StopAsync();

@@ -43,13 +43,19 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
     private Thread? _replyThread;
     private CancellationTokenSource? _cts;
     private int _rumbleCounter;
+    private volatile bool _headsetConnected;
     private bool _disposed;
 
     public ushort ProductId => _productId;
     public byte[] Mac { get; } = [];
+    public bool IsUsb => true;
+    public bool SupportsBleAudio => false;
+    public bool HasHeadsetJackDetect => true;
+    public bool IsHeadsetConnected => _headsetConnected;
 
     public event EventHandler<byte[]>? InputReportReceived;
     public event EventHandler? LinkDropped;
+    public event EventHandler<bool>? HeadsetStateChanged;
 
     public Switch2UsbTransport(Device device, ushort productId, ILogger? logger)
     {
@@ -118,6 +124,19 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
                             $"Pro 2 USB init aborted: {consecutiveFailures} consecutive failures " +
                             $"(last: {command:X2}:{sub:X2} at step {i + 1}/{seq.Count}).", e);
                     }
+                }
+            }
+
+            foreach (var (command, sub, data) in Ns2Protocol.GetPro2UsbAudioInitSequence())
+            {
+                try
+                {
+                    await SendCommandAsync(command, sub, data, ct);
+                    Log($"Audio init cmd {command:X2}:{sub:X2} ok.");
+                }
+                catch (Exception e)
+                {
+                    Log($"Audio init cmd {command:X2}:{sub:X2} skipped ({e.Message}).");
                 }
             }
         }
@@ -274,6 +293,17 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
             var payload = report.Length > Ns2Protocol.StandardReportLen && report[0] is 0x05 or 0x09 or 0x0A or 0x01 or 0x30 or 0x31 or 0xA1
                 ? report[1..]
                 : report;
+
+            if (_productId == Ns2Protocol.PidPro2 && payload.Length >= 8)
+            {
+                var plugged = (BitConverter.ToUInt32(payload, 4) & Ns2Protocol.BtnHeadset) != 0;
+                if (_headsetConnected != plugged)
+                {
+                    _headsetConnected = plugged;
+                    Log($"3.5mm headset {(plugged ? "connected" : "disconnected")}.", LogLevel.Info);
+                    HeadsetStateChanged?.Invoke(this, plugged);
+                }
+            }
 
             InputReportReceived?.Invoke(this, payload);
         }
@@ -456,6 +486,10 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
     {
         await SendCommandAsync(0x09, 0x07, Ns2Protocol.BuildPlayerLedCommand(padId), ct);
     }
+
+    public Task<bool> WriteBleAudioCommandAsync(byte[] payload, CancellationToken ct) => Task.FromResult(false);
+
+    public Task<bool> WriteBleAudioOutputAsync(byte[] payload, CancellationToken ct) => Task.FromResult(false);
 
     public Task StopAsync()
     {

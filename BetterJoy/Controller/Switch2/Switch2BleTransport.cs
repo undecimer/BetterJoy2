@@ -42,19 +42,28 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
     private GattCharacteristic? _commandChar;
     private GattCharacteristic? _responseChar;
     private GattCharacteristic? _rumbleChar;
+    private GattCharacteristic? _audioOutputChar;
+    private GattCharacteristic? _audioCommandChar;
     private GattDeviceService? _service;
     private CancellationTokenSource? _rumbleCts;
     private Task? _rumbleTask;
     private volatile bool _rumbleOn;
+    private volatile bool _headsetConnected;
+    private long _lastAudioWriteTicks;
     private int _silenceCount = 3;
     private int _rumbleCounter;
     private bool _disposed;
 
     public ushort ProductId => _productId;
     public byte[] Mac { get; }
+    public bool IsUsb => false;
+    public bool SupportsBleAudio => _audioOutputChar != null && _audioCommandChar != null;
+    public bool HasHeadsetJackDetect => _productId == Ns2Protocol.PidPro2;
+    public bool IsHeadsetConnected => _headsetConnected;
 
     public event EventHandler<byte[]>? InputReportReceived;
     public event EventHandler? LinkDropped;
+    public event EventHandler<bool>? HeadsetStateChanged;
 
     public Switch2BleTransport(BluetoothLEDevice device, ushort productId, byte[] mac, ILogger? logger,
         bool needsHostPair = false, byte[]? hostMac = null)
@@ -104,6 +113,11 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         _commandChar = chars.FirstOrDefault(c => c.Uuid == Ns2Protocol.CommandCharGuid);
         _responseChar = chars.FirstOrDefault(c => c.Uuid == Ns2Protocol.ResponseCharGuid);
         _rumbleChar = chars.FirstOrDefault(c => c.Uuid == Ns2Protocol.RumbleCharFor(_productId));
+        if (_productId == Ns2Protocol.PidPro2)
+        {
+            _audioOutputChar = chars.FirstOrDefault(c => c.Uuid == Ns2Protocol.AudioOutputCharPro2);
+            _audioCommandChar = chars.FirstOrDefault(c => c.Uuid == Ns2Protocol.AudioCommandCharPro2);
+        }
 
         // Fallback by handle order (Switch2Connect): 2nd WriteNoResp = command,
         // 3rd Notify = response; input = remaining lowest-handle Notify.
@@ -177,6 +191,11 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         await SubscribeAsync(_inputChar, OnInputNotify, ct);
         Log($"Subscribed input handle 0x{_inputChar.AttributeHandle:X4} ({_inputChar.Uuid}).");
 
+        if (_productId == Ns2Protocol.PidPro2)
+        {
+            Log($"Pro 2 BLE audio characteristics: audioOut={_audioOutputChar != null}, audioCmd={_audioCommandChar != null}.");
+        }
+
         if (_productId == Ns2Protocol.PidGameCubeNso)
         {
             foreach (var c in chars
@@ -231,7 +250,8 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
                     rumbleTarget,
                     Ns2Protocol.BuildBleRumblePayload(_productId, _rumbleCounter++, active));
 
-                await Task.Delay(15, ct).ConfigureAwait(false);
+                var delayMs = Environment.TickCount64 - Volatile.Read(ref _lastAudioWriteTicks) < 200 ? 30 : 15;
+                await Task.Delay(delayMs, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -336,7 +356,25 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
             return;
         }
 
+        if (_productId == Ns2Protocol.PidPro2 && data.Length >= 8)
+        {
+            var plugged = (BitConverter.ToUInt32(data, 4) & Ns2Protocol.BtnHeadset) != 0;
+            UpdateHeadsetState(plugged);
+        }
+
         InputReportReceived?.Invoke(this, data);
+    }
+
+    private void UpdateHeadsetState(bool plugged)
+    {
+        if (_headsetConnected == plugged)
+        {
+            return;
+        }
+
+        _headsetConnected = plugged;
+        Log($"3.5mm headset {(plugged ? "connected" : "disconnected")}.", LogLevel.Info);
+        HeadsetStateChanged?.Invoke(this, plugged);
     }
 
     private void OnCommandResponse(GattCharacteristic sender, GattValueChangedEventArgs args)
@@ -467,6 +505,45 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
     public async Task SetPlayerLedAsync(int padId, CancellationToken ct)
     {
         await SendCommandAsync(0x09, 0x07, Ns2Protocol.BuildPlayerLedCommand(padId), ct);
+    }
+
+    public async Task<bool> WriteBleAudioCommandAsync(byte[] payload, CancellationToken ct)
+    {
+        return await WriteAudioNoResponseAsync(_audioCommandChar, payload, ct).ConfigureAwait(false);
+    }
+
+    public async Task<bool> WriteBleAudioOutputAsync(byte[] payload, CancellationToken ct)
+    {
+        Volatile.Write(ref _lastAudioWriteTicks, Environment.TickCount64);
+        return await WriteAudioNoResponseAsync(_audioOutputChar, payload, ct).ConfigureAwait(false);
+    }
+
+    private async Task<bool> WriteAudioNoResponseAsync(GattCharacteristic? characteristic, byte[] payload, CancellationToken ct)
+    {
+        if (characteristic == null || _disposed || ct.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        try
+        {
+            var writeOption = characteristic.CharacteristicProperties.HasFlag(GattCharacteristicProperties.WriteWithoutResponse)
+                ? GattWriteOption.WriteWithoutResponse
+                : GattWriteOption.WriteWithResponse;
+            var op = characteristic.WriteValueWithResultAsync(
+                payload.AsBuffer(), writeOption);
+            using var reg = ct.Register(op.Cancel);
+            var result = await op;
+            return result.Status == GattCommunicationStatus.Success;
+        }
+        catch (Exception e)
+        {
+            if (!ct.IsCancellationRequested && !_disposed)
+            {
+                Log($"Audio write failed on {characteristic.Uuid}: {e.Message}");
+            }
+            return false;
+        }
     }
 
     private async Task WriteCharNoResponseAsync(GattCharacteristic characteristic, byte[] data)

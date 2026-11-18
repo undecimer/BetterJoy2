@@ -75,6 +75,7 @@ public class Switch2Device : IControllerDevice
     private int _ownMouseFlags;
     private int _prevCombinedMouseFlags;
 
+    private readonly Switch2AudioStreamer? _audioStreamer;
     private CancellationTokenSource? _cts;
 
     public bool ActiveGyro { get; set; } = false;
@@ -189,6 +190,12 @@ public class Switch2Device : IControllerDevice
 
         _transport.InputReportReceived += OnInputReport;
         _transport.LinkDropped += OnLinkDropped;
+
+        if (Type == Joycon.ControllerType.Pro2)
+        {
+            _audioStreamer = new Switch2AudioStreamer(_transport, (msg, level) => Log(msg, level));
+            _transport.HeadsetStateChanged += OnHeadsetStateChanged;
+        }
     }
 
     private void Log(string message, LogLevel level = LogLevel.Debug)
@@ -291,6 +298,7 @@ public class Switch2Device : IControllerDevice
     public void Begin()
     {
         Log("Ready.");
+        UpdateAudioStreamer();
     }
 
     public void Detach(bool close = true)
@@ -299,6 +307,8 @@ public class Switch2Device : IControllerDevice
 
         try
         {
+            _transport.HeadsetStateChanged -= OnHeadsetStateChanged;
+            _audioStreamer?.Dispose();
             _transport.StopAsync().GetAwaiter().GetResult();
             _transport.Dispose();
         }
@@ -312,7 +322,42 @@ public class Switch2Device : IControllerDevice
 
     public void Drop(bool error = false, bool waitThreads = true)
     {
+        _audioStreamer?.Stop();
         SetState(error ? Joycon.Status.Errored : Joycon.Status.Dropped);
+    }
+
+    private void OnHeadsetStateChanged(object? sender, bool connected)
+    {
+        UpdateAudioStreamer();
+    }
+
+    private void UpdateAudioStreamer()
+    {
+        if (_audioStreamer == null || _state < Joycon.Status.Attached)
+        {
+            return;
+        }
+
+        if (!Config.EnablePro2Audio)
+        {
+            _audioStreamer.Stop();
+            return;
+        }
+
+        if (_transport.IsUsb)
+        {
+            _audioStreamer.Start();
+            return;
+        }
+
+        if (_transport.SupportsBleAudio && (_transport.IsHeadsetConnected || !_transport.HasHeadsetJackDetect))
+        {
+            _audioStreamer.Start();
+        }
+        else
+        {
+            _audioStreamer.Stop();
+        }
     }
 
     public bool Reset() => true;
@@ -1391,5 +1436,6 @@ public class Switch2Device : IControllerDevice
     {
         Config.Update();
         RequestSetLEDByPadID();
+        UpdateAudioStreamer();
     }
 }

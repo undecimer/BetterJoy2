@@ -17,4 +17,10 @@ internal static partial class NativeMethods
 
     [LibraryImport("kernel32.dll", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
     public static partial IntPtr AddDllDirectory(string directory);
+
+    [LibraryImport("winmm.dll")]
+    public static partial uint timeBeginPeriod(uint uPeriod);
+
+    [LibraryImport("winmm.dll")]
+    public static partial uint timeEndPeriod(uint uPeriod);
 }
