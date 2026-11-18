@@ -27,9 +27,17 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
     private readonly SemaphoreSlim _commandLock = new(1, 1);
     private readonly ConcurrentDictionary<byte, TaskCompletionSource<byte[]>> _pendingCommands = new();
 
+    // HID output-report command fallback (Switch2Connect send_startup_reports_hid):
+    // when interface MI_01 isn't bound to WinUSB, commands go as output reports
+    // on interface 0 — report 0x02 for Pro 2, 0x03 for GameCube.
+    private const byte OutputReportIdPro2 = 0x02;
+    private const byte OutputReportIdGameCube = 0x03;
+    private const int OutputReportBodySize = 0x2A;
+
     private UsbDevice? _commandInterface;
     private UsbBulkOutPipe? _bulkOut;
     private UsbBulkInPipe? _bulkIn;
+    private bool _useHidCommands;
     private Thread? _inputThread;
     private Thread? _replyThread;
     private CancellationTokenSource? _cts;
@@ -60,15 +68,16 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
             // GC needs the 17-command activation sequence on its vendor
             // interface before it starts streaming HID input reports.
             await OpenCommandInterfaceAsync(requireBulkIn: false, ct);
-            if (_bulkOut == null)
+            _useHidCommands = _bulkOut == null;
+            if (_useHidCommands)
             {
-                throw new InvalidOperationException("GameCube USB vendor interface not found.");
+                Log("WinUSB interface unavailable; using HID output-report fallback.");
             }
 
             foreach (var frame in Ns2Protocol.GetGameCubeUsbInitSequence())
             {
-                await WriteBulkAsync(frame, ct);
-                await Task.Delay(10, ct);
+                await WriteCommandFrameAsync(frame, ct);
+                await Task.Delay(20, ct);
             }
 
             // The HID interface owns input afterwards; keep the command iface
@@ -77,13 +86,16 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
         else if (_productId == Ns2Protocol.PidPro2)
         {
             await OpenCommandInterfaceAsync(requireBulkIn: true, ct);
-            if (_bulkOut == null || _bulkIn == null)
+            _useHidCommands = _bulkOut == null || _bulkIn == null;
+            if (_useHidCommands)
             {
-                throw new InvalidOperationException("Pro 2 USB command interface not found.");
+                Log("WinUSB interface unavailable; using HID output-report fallback.");
             }
-
-            _replyThread = new Thread(() => ReadCommandReplies(_cts.Token)) { IsBackground = true };
-            _replyThread.Start();
+            else
+            {
+                _replyThread = new Thread(() => ReadCommandReplies(_cts.Token)) { IsBackground = true };
+                _replyThread.Start();
+            }
 
             var seq = Ns2Protocol.GetPro2UsbInitSequence();
             var consecutiveFailures = 0;
@@ -158,6 +170,26 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
                 Log($"USB interface {info.Id} open failed: {e.Message}");
                 usb?.Dispose();
             }
+        }
+    }
+
+    private async Task WriteCommandFrameAsync(byte[] frame, CancellationToken ct)
+    {
+        if (!_useHidCommands)
+        {
+            await WriteBulkAsync(frame, ct);
+            return;
+        }
+
+        // [report id] + command frame zero-padded to the output-report body size
+        var report = new byte[1 + OutputReportBodySize];
+        report[0] = _productId == Ns2Protocol.PidGameCubeNso
+            ? OutputReportIdGameCube
+            : OutputReportIdPro2;
+        frame.CopyTo(report.AsSpan(1));
+        if (_device.Write(report, report.Length) <= 0)
+        {
+            throw new InvalidOperationException("HID output-report write failed.");
         }
     }
 
@@ -314,6 +346,24 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
 
     public async Task<byte[]> SendCommandAsync(byte command, byte subcommand, ReadOnlyMemory<byte> data, CancellationToken ct)
     {
+        if (_useHidCommands)
+        {
+            // Fire-and-forget: the HID route has no command-reply channel (the
+            // reference sends the whole startup this way, paced ~20 ms apart).
+            await _commandLock.WaitAsync(ct);
+            try
+            {
+                var frame = Ns2Protocol.BuildCommand(command, subcommand, data.Span, usb: true);
+                await WriteCommandFrameAsync(frame, ct);
+                await Task.Delay(20, ct);
+                return [];
+            }
+            finally
+            {
+                _commandLock.Release();
+            }
+        }
+
         var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pendingCommands[command] = tcs;
 
