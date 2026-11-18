@@ -1306,6 +1306,23 @@ public partial class MainForm : Form
             case Joycon.ControllerType.N64:
                 temp = charging ? Resources.n64_charging : Resources.n64;
                 break;
+            // Switch 2 controllers reuse the matching generation-1 artwork.
+            case Joycon.ControllerType.Joycon2Left:
+                temp = joined
+                    ? (charging ? Resources.jc_left_charging : Resources.jc_left)
+                    : (charging ? Resources.jc_left_s_charging : Resources.jc_left_s);
+                break;
+            case Joycon.ControllerType.Joycon2Right:
+                temp = joined
+                    ? (charging ? Resources.jc_right_charging : Resources.jc_right)
+                    : (charging ? Resources.jc_right_s_charging : Resources.jc_right_s);
+                break;
+            case Joycon.ControllerType.Pro2:
+                temp = charging ? Resources.pro_charging : Resources.pro;
+                break;
+            case Joycon.ControllerType.GameCubeNSO:
+                temp = Resources.n64;
+                break;
             default:
                 temp = Resources.cross;
                 break;
