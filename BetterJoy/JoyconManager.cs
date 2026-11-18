@@ -306,10 +306,12 @@ public class JoyconManager
 
         var isUSB = info.BusType == BusType.USB;
 
-        // Switch 2 pads enumerate extra HID interfaces (vendor MI_01 also
-        // reports a gamepad usage) — only interface 0 is a real controller
-        // instance; the rest are command/utility endpoints.
-        if (Ns2Protocol.IsSwitch2Type(type) && info.InterfaceNumber > 0)
+        // Switch 2 over HID is only real on a wired link: a BLE-connected pad
+        // also appears in hidapi as a Bluetooth HID node (Windows synthetic
+        // HID), and USB pads expose extra vendor interfaces (MI_01) that report
+        // a gamepad usage too. USB + interface 0 is the only real instance —
+        // everything else is handled by the BLE watcher or is an endpoint.
+        if (Ns2Protocol.IsSwitch2Type(type) && (!isUSB || info.InterfaceNumber > 0))
         {
             return;
         }
