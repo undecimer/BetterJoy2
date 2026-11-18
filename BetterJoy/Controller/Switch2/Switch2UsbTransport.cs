@@ -85,9 +85,20 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
             _replyThread = new Thread(() => ReadCommandReplies(_cts.Token)) { IsBackground = true };
             _replyThread.Start();
 
-            foreach (var (command, sub, data) in Ns2Protocol.GetPro2UsbInitSequence())
+            var seq = Ns2Protocol.GetPro2UsbInitSequence();
+            for (var i = 0; i < seq.Count; i++)
             {
-                await SendCommandAsync(command, sub, data, ct);
+                var (command, sub, data) = seq[i];
+                Log($"Init {i + 1}/{seq.Count}: cmd {command:X2}:{sub:X2}");
+                try
+                {
+                    await SendCommandAsync(command, sub, data, ct);
+                }
+                catch (Exception e)
+                {
+                    throw new InvalidOperationException(
+                        $"Pro 2 USB init step {i + 1}/{seq.Count} (cmd {command:X2}:{sub:X2}) failed: {e.Message}", e);
+                }
             }
         }
 
@@ -301,7 +312,11 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
 
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(CommandTimeoutMs);
-            await using (timeoutCts.Token.Register(() => tcs.TrySetCanceled()))
+            await using (timeoutCts.Token.Register(() =>
+            {
+                Log($"Command {command:X2}:{subcommand:X2} timed out after {CommandTimeoutMs} ms.", LogLevel.Warning);
+                tcs.TrySetCanceled();
+            }))
             {
                 return await tcs.Task;
             }

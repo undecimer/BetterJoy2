@@ -68,6 +68,8 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
             Log($"PreferredConnectionParameters failed: {e.Message}");
         }
 
+        Log($"GATT services query for {_device.BluetoothAddress:X12}...");
+
         var servicesResult = await _device.GetGattServicesForUuidAsync(
             Ns2Protocol.ServiceGuid, BluetoothCacheMode.Uncached);
         if (servicesResult.Status != GattCommunicationStatus.Success || servicesResult.Services.Count == 0)
@@ -120,7 +122,9 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         _device.ConnectionStatusChanged += OnConnectionStatusChanged;
 
         await SubscribeAsync(_responseChar, OnCommandResponse, ct);
+        Log("Subscribed to command response characteristic.");
         await SubscribeAsync(_inputChar, OnInputReport, ct);
+        Log("Subscribed to input report characteristic.");
 
         await RunInitSequenceAsync(ct);
 
@@ -166,13 +170,32 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
 
     private async Task RunInitSequenceAsync(CancellationToken ct)
     {
-        foreach (var (command, sub, data) in Ns2Protocol.GetBleInitSequence(_productId))
+        var seq = Ns2Protocol.GetBleInitSequence(_productId);
+        for (var i = 0; i < seq.Count; i++)
         {
-            await SendCommandAsync(command, sub, data, ct);
+            var (command, sub, data) = seq[i];
+            Log($"Init {i + 1}/{seq.Count}: cmd {command:X2}:{sub:X2}");
+            try
+            {
+                await SendCommandAsync(command, sub, data, ct);
+            }
+            catch (Exception e)
+            {
+                throw new InvalidOperationException(
+                    $"BLE init step {i + 1}/{seq.Count} (cmd {command:X2}:{sub:X2}) failed: {e.Message}", e);
+            }
         }
 
         // Player LED off until the device is registered and assigned a pad id
-        await SendCommandAsync(0x09, 0x07, new byte[] { 0x00 }.Concat(new byte[7]).ToArray(), ct);
+        Log("Init: player LED off (cmd 09:07)");
+        try
+        {
+            await SendCommandAsync(0x09, 0x07, new byte[] { 0x00 }.Concat(new byte[7]).ToArray(), ct);
+        }
+        catch (Exception e)
+        {
+            throw new InvalidOperationException($"BLE init LED off (cmd 09:07) failed: {e.Message}", e);
+        }
     }
 
     private async Task SubscribeAsync(
@@ -256,7 +279,11 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(CommandTimeoutMs);
 
-            await using (timeoutCts.Token.Register(() => tcs.TrySetCanceled()))
+            await using (timeoutCts.Token.Register(() =>
+            {
+                Log($"Command {command:X2}:{subcommand:X2} timed out after {CommandTimeoutMs} ms.", LogLevel.Warning);
+                tcs.TrySetCanceled();
+            }))
             {
                 return await tcs.Task;
             }
