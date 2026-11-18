@@ -177,9 +177,9 @@ public class Switch2Device : IControllerDevice
             MacAddress = macAddress;
         }
 
-        OutXbox = new OutputControllerXbox360(Ns2Protocol.VendorId, _transport.ProductId);
+        OutXbox = new OutputControllerXbox360();
         OutXbox.FeedbackReceived += ReceiveRumble;
-        OutDs4 = new OutputControllerDualShock4(Ns2Protocol.VendorId, _transport.ProductId);
+        OutDs4 = new OutputControllerDualShock4();
         OutDs4.FeedbackReceived += Ds4_FeedbackReceived;
 
         _deadZone = StickDeadZoneCalibration.FromConfigLeft(Config);
@@ -1086,9 +1086,9 @@ public class Switch2Device : IControllerDevice
         var stickY = isJoycon && Other == null ? (isLeft ? 1f : -1f) * stick.X : stick.Y;
 
         output.ThumbLeftX = (byte)Math.Clamp(stickX * 127 + 128, 0, 255);
-        output.ThumbLeftY = (byte)Math.Clamp(stickY * 127 + 128, 0, 255);
+        output.ThumbLeftY = (byte)Math.Clamp(-stickY * 127 + 128, 0, 255);
         output.ThumbRightX = (byte)Math.Clamp(stick2.X * 127 + 128, 0, 255);
-        output.ThumbRightY = (byte)Math.Clamp(stick2.Y * 127 + 128, 0, 255);
+        output.ThumbRightY = (byte)Math.Clamp(-stick2.Y * 127 + 128, 0, 255);
 
         if (isJoycon && Other != null && !isLeft)
         {
@@ -1096,6 +1096,16 @@ public class Switch2Device : IControllerDevice
             output.ThumbLeftX = output.ThumbRightX;
             output.ThumbLeftY = output.ThumbRightY;
         }
+
+        var motion = (Other != null && !IsLeft ? Other : this)._motion;
+        output.HasMotion = true;
+        output.Timestamp = unchecked((ushort)(Timestamp * 3 / 16));
+        output.GyroX = (short)Math.Clamp(motion.Gyroscope.Y * 16.384f, short.MinValue, short.MaxValue);
+        output.GyroY = (short)Math.Clamp(motion.Gyroscope.Z * 16.384f, short.MinValue, short.MaxValue);
+        output.GyroZ = (short)Math.Clamp(motion.Gyroscope.X * 16.384f, short.MinValue, short.MaxValue);
+        output.AccelX = (short)Math.Clamp(motion.Accelerometer.Y * 8000f, short.MinValue, short.MaxValue);
+        output.AccelY = (short)Math.Clamp(-motion.Accelerometer.Z * 8000f, short.MinValue, short.MaxValue);
+        output.AccelZ = (short)Math.Clamp(motion.Accelerometer.X * 8000f, short.MinValue, short.MaxValue);
 
         return output;
     }

@@ -48,8 +48,24 @@ public struct OutputControllerDualShock4InputState
     public byte TriggerLeftValue;
     public byte TriggerRightValue;
 
+    public short GyroX;
+    public short GyroY;
+    public short GyroZ;
+
+    public short AccelX;
+    public short AccelY;
+    public short AccelZ;
+
+    public ushort Timestamp;
+    public bool HasMotion;
+
     public readonly bool IsEqual(OutputControllerDualShock4InputState other)
     {
+        if (HasMotion || other.HasMotion)
+        {
+            return false;
+        }
+
         var buttons = Triangle == other.Triangle
                       && Circle == other.Circle
                       && Cross == other.Cross
@@ -83,9 +99,11 @@ public class OutputControllerDualShock4
     public delegate void DualShock4FeedbackReceivedEventHandler(DualShock4FeedbackReceivedEventArgs e);
 
     private readonly IDualShock4Controller? _controller;
+    private readonly byte[] _rawReportEx = new byte[63];
 
     private OutputControllerDualShock4InputState _currentState;
 
+    private byte _touchPacketCounter;
     private bool _connected = false;
 
     public OutputControllerDualShock4()
@@ -176,6 +194,13 @@ public class OutputControllerDualShock4
             return;
         }
 
+        if (newState.HasMotion)
+        {
+            SubmitExtendedReport(newState);
+            _currentState = newState;
+            return;
+        }
+
         _controller.SetButtonState(DualShock4Button.Triangle, newState.Triangle);
         _controller.SetButtonState(DualShock4Button.Circle, newState.Circle);
         _controller.SetButtonState(DualShock4Button.Cross, newState.Cross);
@@ -208,6 +233,62 @@ public class OutputControllerDualShock4
         _controller.SubmitReport();
 
         _currentState = newState;
+    }
+
+    private void SubmitExtendedReport(OutputControllerDualShock4InputState newState)
+    {
+        var report = _rawReportEx.AsSpan();
+        report.Clear();
+
+        report[0] = newState.ThumbLeftX;
+        report[1] = newState.ThumbLeftY;
+        report[2] = newState.ThumbRightX;
+        report[3] = newState.ThumbRightY;
+
+        var buttons = MapDPadDirection(newState.DPad).Value;
+        if (newState.Square) buttons |= DualShock4Button.Square.Value;
+        if (newState.Cross) buttons |= DualShock4Button.Cross.Value;
+        if (newState.Circle) buttons |= DualShock4Button.Circle.Value;
+        if (newState.Triangle) buttons |= DualShock4Button.Triangle.Value;
+        if (newState.ShoulderLeft) buttons |= DualShock4Button.ShoulderLeft.Value;
+        if (newState.ShoulderRight) buttons |= DualShock4Button.ShoulderRight.Value;
+        if (newState.TriggerLeft) buttons |= DualShock4Button.TriggerLeft.Value;
+        if (newState.TriggerRight) buttons |= DualShock4Button.TriggerRight.Value;
+        if (newState.Share) buttons |= DualShock4Button.Share.Value;
+        if (newState.Options) buttons |= DualShock4Button.Options.Value;
+        if (newState.ThumbLeft) buttons |= DualShock4Button.ThumbLeft.Value;
+        if (newState.ThumbRight) buttons |= DualShock4Button.ThumbRight.Value;
+        BitConverter.TryWriteBytes(report.Slice(4, 2), buttons);
+
+        byte special = 0;
+        if (newState.Ps) special |= (byte)DualShock4SpecialButton.Ps.Value;
+        if (newState.Touchpad) special |= (byte)DualShock4SpecialButton.Touchpad.Value;
+        report[6] = special;
+
+        report[7] = newState.TriggerLeftValue;
+        report[8] = newState.TriggerRightValue;
+
+        BitConverter.TryWriteBytes(report.Slice(9, 2), newState.Timestamp);
+        report[11] = 0xAF; // bBatteryLvl
+
+        BitConverter.TryWriteBytes(report.Slice(12, 2), newState.GyroX);
+        BitConverter.TryWriteBytes(report.Slice(14, 2), newState.GyroY);
+        BitConverter.TryWriteBytes(report.Slice(16, 2), newState.GyroZ);
+        BitConverter.TryWriteBytes(report.Slice(18, 2), newState.AccelX);
+        BitConverter.TryWriteBytes(report.Slice(20, 2), newState.AccelY);
+        BitConverter.TryWriteBytes(report.Slice(22, 2), newState.AccelZ);
+
+        report[29] = 0x08; // bBatteryLvlSpecial
+        report[32] = 0x01; // bTouchPacketsN
+        report[33] = _touchPacketCounter++;
+        report[34] = 0x80; // current touch finger 1 up
+        report[38] = 0x80; // current touch finger 2 up
+        report[43] = 0x80; // previous touch 0 finger 1 up
+        report[47] = 0x80; // previous touch 0 finger 2 up
+        report[52] = 0x80; // previous touch 1 finger 1 up
+        report[56] = 0x80; // previous touch 1 finger 2 up
+
+        _controller!.SubmitRawReport(_rawReportEx);
     }
 
     private static DualShock4DPadDirection MapDPadDirection(DpadDirection dPad)
