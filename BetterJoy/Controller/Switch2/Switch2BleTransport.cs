@@ -131,10 +131,10 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         await SubscribeAsync(_inputChar, OnInputReport, ct);
         Log("Subscribed to input report characteristic.");
 
-        await RunInitSequenceAsync(ct);
-
-        // Unpaired advertisement link: bond to the host now (Switch2Connect's
-        // pair()) or the controller powers off when its pairing window ends.
+        // Unpaired advertisement link: bond to the host first (Switch2Connect's
+        // pair()). Pro 2 answers query commands unbonded but goes silent on the
+        // write/config commands (0A:08 onwards) — the MAC+LTK exchange must
+        // happen before the init sequence, not after it.
         if (_needsHostPair && _hostMac.Length >= 6)
         {
             try
@@ -146,6 +146,8 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
                 Log($"Host pairing failed: {e.Message}", LogLevel.Warning);
             }
         }
+
+        await RunInitSequenceAsync(ct);
 
         // Joy-Con 2 + GameCube only (not Pro 2): raw write selects input format 3.
         if (_productId is Ns2Protocol.PidJoycon2Left or Ns2Protocol.PidJoycon2Right

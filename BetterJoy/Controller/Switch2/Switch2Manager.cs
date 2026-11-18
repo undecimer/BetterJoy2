@@ -220,11 +220,15 @@ internal sealed class Switch2Manager : IDisposable
                 mac[i] = (byte)(address >> (8 * (5 - i)));
             }
 
-            // Unpaired link (sync-button advertisement): the controller drops the
-            // connection when its pairing window closes unless the host bonds to
-            // it in-protocol (0x15 MAC/LTK). Host MAC comes from the default radio.
-            var needsHostPair = !(device.DeviceInformation?.Pairing?.IsPaired ?? false);
+            // Sync-button advertisement (or not OS-paired): the controller drops
+            // the link when its pairing window closes unless the host bonds to it
+            // in-protocol (0x15 MAC/LTK). Host MAC comes from the default radio.
+            var needsHostPair = advertisedPid != 0 || !(device.DeviceInformation?.Pairing?.IsPaired ?? false);
             var hostMac = needsHostPair ? await GetHostMacAsync() : [];
+            if (needsHostPair && hostMac.Length < 6)
+            {
+                _logger?.Log("Switch 2 host pairing skipped: adapter MAC unavailable.", LogLevel.Warning);
+            }
 
             var transport = new Switch2BleTransport(
                 device, productId, mac, _logger, needsHostPair, hostMac);
