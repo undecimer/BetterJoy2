@@ -86,6 +86,7 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
             _replyThread.Start();
 
             var seq = Ns2Protocol.GetPro2UsbInitSequence();
+            var consecutiveFailures = 0;
             for (var i = 0; i < seq.Count; i++)
             {
                 var (command, sub, data) = seq[i];
@@ -93,11 +94,17 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
                 try
                 {
                     await SendCommandAsync(command, sub, data, ct);
+                    consecutiveFailures = 0;
                 }
                 catch (Exception e)
                 {
-                    throw new InvalidOperationException(
-                        $"Pro 2 USB init step {i + 1}/{seq.Count} (cmd {command:X2}:{sub:X2}) failed: {e.Message}", e);
+                    Log($"Init step {i + 1}/{seq.Count} (cmd {command:X2}:{sub:X2}) failed: {e.Message}", LogLevel.Warning);
+                    if (++consecutiveFailures >= 3)
+                    {
+                        throw new InvalidOperationException(
+                            $"Pro 2 USB init aborted: {consecutiveFailures} consecutive failures " +
+                            $"(last: {command:X2}:{sub:X2} at step {i + 1}/{seq.Count}).", e);
+                    }
                 }
             }
         }

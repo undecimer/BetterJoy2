@@ -171,6 +171,7 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
     private async Task RunInitSequenceAsync(CancellationToken ct)
     {
         var seq = Ns2Protocol.GetBleInitSequence(_productId);
+        var consecutiveFailures = 0;
         for (var i = 0; i < seq.Count; i++)
         {
             var (command, sub, data) = seq[i];
@@ -178,15 +179,25 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
             try
             {
                 await SendCommandAsync(command, sub, data, ct);
+                consecutiveFailures = 0;
             }
             catch (Exception e)
             {
-                throw new InvalidOperationException(
-                    $"BLE init step {i + 1}/{seq.Count} (cmd {command:X2}:{sub:X2}) failed: {e.Message}", e);
+                // Switch2Connect tolerates individual init commands the
+                // controller ignores (e.g. Pro 2 and 0A:08); only a run of
+                // consecutive failures means the link itself is dead.
+                Log($"Init step {i + 1}/{seq.Count} (cmd {command:X2}:{sub:X2}) failed: {e.Message}", LogLevel.Warning);
+                if (++consecutiveFailures >= 3)
+                {
+                    throw new InvalidOperationException(
+                        $"BLE init aborted: {consecutiveFailures} consecutive failures " +
+                        $"(last: {command:X2}:{sub:X2} at step {i + 1}/{seq.Count}).", e);
+                }
             }
         }
 
-        // Player LED off until the device is registered and assigned a pad id
+        // Player LED off until the device is registered and assigned a pad id;
+        // non-critical, so a missed ack is only a warning.
         Log("Init: player LED off (cmd 09:07)");
         try
         {
@@ -194,7 +205,7 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         }
         catch (Exception e)
         {
-            throw new InvalidOperationException($"BLE init LED off (cmd 09:07) failed: {e.Message}", e);
+            Log($"Init LED off (cmd 09:07) failed: {e.Message}", LogLevel.Warning);
         }
     }
 
