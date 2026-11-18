@@ -53,6 +53,7 @@ public class Joycon : IControllerDevice
 
     public enum ControllerType : byte
     {
+        Unknown = 0x00,
         Pro = 0x01,
         JoyconLeft = 0x02,
         JoyconRight = 0x03,
@@ -61,6 +62,11 @@ public class Joycon : IControllerDevice
         NES = 0x06,
         FamicomI = 0x07,
         FamicomII = 0x08,
+        // Nintendo Switch 2 generation
+        Joycon2Left = 0x09,
+        Joycon2Right = 0x0A,
+        Pro2 = 0x0B,
+        GameCubeNSO = 0x0C,
     }
 
     public enum DebugType
@@ -3345,6 +3351,10 @@ public class Joycon : IControllerDevice
             ControllerType.FamicomI    => "Famicom I controller",
             ControllerType.FamicomII   => "Famicom II controller",
             ControllerType.N64         => "N64 controller",
+            ControllerType.Joycon2Left  => "Left Joy-Con 2",
+            ControllerType.Joycon2Right => "Right Joy-Con 2",
+            ControllerType.Pro2         => "Pro Controller 2",
+            ControllerType.GameCubeNSO  => "GameCube controller",
             _                          => "Controller"
 #pragma warning restore IDE0055
         };

@@ -1,6 +1,7 @@
 #nullable disable
 using BetterJoy.Collections;
 using BetterJoy.Config;
+using BetterJoy.Controller.Switch2;
 using BetterJoy.Exceptions;
 using BetterJoy.Forms;
 using BetterJoy.Logging;
@@ -121,6 +122,7 @@ internal class Program
 
         _logger?.Log("All systems go.");
         Mgr.Start();
+        Switch2Manager.Start(_logger, Mgr, _form);
         _isRunning = true;
     }
 
@@ -359,6 +361,7 @@ internal class Program
 
         if (Mgr != null)
         {
+            Switch2Manager.Stop();
             await Mgr.Stop();
         }
 
