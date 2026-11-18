@@ -51,6 +51,8 @@ public class Switch2Device : IControllerDevice
     private StickRangeCalibration _range;
     private StickRangeCalibration _range2;
     private bool _userCalibrated;
+    private StickLimitsCalibration? _userStickCal;
+    private StickLimitsCalibration? _userStick2Cal;
 
     private Motion _motion = new();
     private readonly MadgwickAHRS _AHRS; // filtered rotation (DCM) for motion features and UDP gyro consumers
@@ -58,7 +60,6 @@ public class Switch2Device : IControllerDevice
     private long _lastMotionTicks;
     private bool _motionCalibrated;
     private ThreeAxisShort _motionNeutralGyro;
-    private ThreeAxisShort _motionNeutralAccel;
     private Joycon.Status _state = Joycon.Status.NotAttached;
     private bool _isLeft;
     private bool _calibrateMotion;
@@ -512,7 +513,7 @@ public class Switch2Device : IControllerDevice
         _stickPrecal = new TwoAxisUShort(input.LeftX, input.LeftY);
         _stick2Precal = new TwoAxisUShort(input.RightX, input.RightY);
 
-        var cal = _stickCal;
+        var cal = _userCalibrated && _userStickCal != null ? _userStickCal : _stickCal;
         var dz = _deadZone;
         var range = _range;
         var antiDeadzone = Config.StickLeftAntiDeadzone;
@@ -527,7 +528,7 @@ public class Switch2Device : IControllerDevice
 
         if (!IsJoycon)
         {
-            cal = _stick2Cal;
+            cal = _userCalibrated && _userStick2Cal != null ? _userStick2Cal : _stick2Cal;
             dz = _deadZone2;
             range = _range2;
             antiDeadzone = Config.StickRightAntiDeadzone;
@@ -568,25 +569,27 @@ public class Switch2Device : IControllerDevice
         var gyroPerDps = IsPro || IsGameCube ? 14.2857f : 16.384f;
 
         // Gyroscope in deg/s, accelerometer in g — same convention as Joycon
-        // and what the DSU/Cemuhook packet expects. User calibration offsets
-        // (rest-position medians) are subtracted in raw units before scaling.
+        // and what the DSU/Cemuhook packet expects. Only the gyro gets a user
+        // offset (rest-position median): the accel median embeds gravity, so
+        // subtracting it would remove the gravity reference the orientation
+        // filter and DSU clients need.
         var nG = _motionCalibrated ? _motionNeutralGyro : ThreeAxisShort.Zero;
-        var nA = _motionCalibrated ? _motionNeutralAccel : ThreeAxisShort.Zero;
         _motion = new Motion(
             new Vector3(
                 (input.GyroX - nG.X) / gyroPerDps,
                 (input.GyroY - nG.Y) / gyroPerDps,
                 (input.GyroZ - nG.Z) / gyroPerDps),
             new Vector3(
-                (input.AccelX - nA.X) / accelPerG,
-                (input.AccelY - nA.Y) / accelPerG,
-                (input.AccelZ - nA.Z) / accelPerG));
+                input.AccelX / accelPerG,
+                input.AccelY / accelPerG,
+                input.AccelZ / accelPerG));
 
-        // Feed the Madgwick filter (gyro in rad/s, accel in g).
-        var now = Timestamp != 0 ? (long)Timestamp : DateTime.UtcNow.Ticks;
+        // Feed the Madgwick filter (gyro in rad/s, accel in g). Timestamp is
+        // in microseconds, so dt must be divided by 1e6, not TicksPerSecond.
+        var now = Timestamp != 0 ? (long)Timestamp : DateTime.UtcNow.Ticks / 10;
         if (_lastMotionTicks != 0)
         {
-            _AHRS.SamplePeriod = Math.Clamp((now - _lastMotionTicks) / (float)TimeSpan.TicksPerSecond, 0.001f, 0.1f);
+            _AHRS.SamplePeriod = Math.Clamp((now - _lastMotionTicks) / 1_000_000f, 0.001f, 0.1f);
         }
         _lastMotionTicks = now;
 
@@ -1119,7 +1122,6 @@ public class Switch2Device : IControllerDevice
         if (activeMotionData != null)
         {
             _motionNeutralGyro = new ThreeAxisShort(activeMotionData[0], activeMotionData[1], activeMotionData[2]);
-            _motionNeutralAccel = new ThreeAxisShort(activeMotionData[3], activeMotionData[4], activeMotionData[5]);
             _motionCalibrated = true;
         }
         else
@@ -1133,8 +1135,8 @@ public class Switch2Device : IControllerDevice
         var activeSticksData = _form.ActiveCaliSticksData(SerialOrMac);
         if (activeSticksData != null)
         {
-            _stickCal = new StickLimitsCalibration(activeSticksData.AsSpan(0, 6), true);
-            _stick2Cal = new StickLimitsCalibration(activeSticksData.AsSpan(6, 6), false);
+            _userStickCal = new StickLimitsCalibration(activeSticksData.AsSpan(0, 6), true);
+            _userStick2Cal = new StickLimitsCalibration(activeSticksData.AsSpan(6, 6), false);
             _userCalibrated = true;
         }
     }
@@ -1180,6 +1182,8 @@ public class Switch2Device : IControllerDevice
         {
             _motionCalibrated = false;
             _userCalibrated = false;
+            _userStickCal = null;
+            _userStick2Cal = null;
         }
     }
 
