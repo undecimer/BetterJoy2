@@ -48,7 +48,12 @@ public class Joycon : IControllerDevice
         X = 16,
         Stick2 = 17,
         Shoulder21 = 18,
-        Shoulder22 = 19
+        Shoulder22 = 19,
+
+        // Switch 2 controllers
+        Chat = 20,
+        Gl = 21,
+        Gr = 22
     }
 
     public enum ControllerType : byte
@@ -129,12 +134,12 @@ public class Joycon : IControllerDevice
 
     private readonly MadgwickAHRS _AHRS; // for getting filtered Euler angles of rotation; 5ms sampling rate
 
-    private readonly bool[] _buttons = new bool[20];
-    private readonly bool[] _buttonsDown = new bool[20];
-    private readonly long[] _buttonsDownTimestamp = new long[20];
-    private readonly bool[] _buttonsUp = new bool[20];
-    private readonly bool[] _buttonsPrev = new bool[20];
-    private readonly bool[] _buttonsRemapped = new bool[20];
+    private readonly bool[] _buttons = new bool[23];
+    private readonly bool[] _buttonsDown = new bool[23];
+    private readonly long[] _buttonsDownTimestamp = new long[23];
+    private readonly bool[] _buttonsUp = new bool[23];
+    private readonly bool[] _buttonsPrev = new bool[23];
+    private readonly bool[] _buttonsRemapped = new bool[23];
 
     private readonly float[] _curRotation = [0, 0, 0, 0, 0, 0]; // Filtered motion data
 

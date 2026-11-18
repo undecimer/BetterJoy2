@@ -33,6 +33,7 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
     private Thread? _inputThread;
     private Thread? _replyThread;
     private CancellationTokenSource? _cts;
+    private int _rumbleCounter;
     private bool _disposed;
 
     public ushort ProductId => _productId;
@@ -327,7 +328,30 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
 
     public void SetRumble(bool on)
     {
-        // USB rumble transport (vendor command) is handled in Paso 5.
+        _ = SendRumbleAsync(on);
+    }
+
+    private async Task SendRumbleAsync(bool on)
+    {
+        try
+        {
+            var ct = _cts?.Token ?? CancellationToken.None;
+            if (_productId == Ns2Protocol.PidGameCubeNso)
+            {
+                // GC NSO takes its rumble flag on the vendor command channel.
+                await SendCommandAsync(0x0A, 0x02, new byte[] { on ? (byte)0x01 : (byte)0x00, 0x00, 0x00, 0x00 }, ct);
+            }
+            else
+            {
+                // Joy-Con 2 / Pro 2: same 0x50 keep-alive + rumble frame used
+                // on the BLE vibration characteristic, written on bulk OUT.
+                await WriteBulkAsync(Ns2Protocol.BuildRumbleFrame(_rumbleCounter++, on), ct);
+            }
+        }
+        catch (Exception e)
+        {
+            Log($"Rumble write failed: {e.Message}");
+        }
     }
 
     public async Task SetPlayerLedAsync(int padId, CancellationToken ct)

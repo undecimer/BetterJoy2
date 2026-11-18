@@ -15,6 +15,7 @@ using BetterJoy.Network;
 using BetterJoy.Network.Server;
 using Nefarius.ViGEm.Client.Targets.DualShock4;
 using Nefarius.ViGEm.Client.Targets.Xbox360;
+using WindowsInput.Events;
 
 namespace BetterJoy.Controller.Switch2;
 
@@ -34,8 +35,8 @@ public class Switch2Device : IControllerDevice
     // ------------------------------------------------------------------
     // State
     // ------------------------------------------------------------------
-    private readonly bool[] _buttons = new bool[20];
-    private readonly bool[] _buttonsRemapped = new bool[20];
+    private readonly bool[] _buttons = new bool[23];
+    private readonly bool[] _buttonsRemapped = new bool[23];
 
     private Stick _stick;
     private Stick _stick2;
@@ -64,6 +65,14 @@ public class Switch2Device : IControllerDevice
     private bool _isLeft;
     private bool _calibrateMotion;
     private bool _calibrateSticks;
+
+    // Optical mouse mode (Joy-Con 2 resting on a surface)
+    private bool _mouseActive;
+    private int _prevMouseX;
+    private int _prevMouseY;
+    private bool _prevMouseL;
+    private bool _prevMouseR;
+    private bool _prevMouseM;
 
     private CancellationTokenSource? _cts;
 
@@ -356,7 +365,10 @@ public class Switch2Device : IControllerDevice
         }
 
         Array.Clear(_buttons);
-        ApplyButtons(input.Buttons);
+        var buttonsMask = input.Buttons;
+        ProcessOpticalMouse(in input, ref buttonsMask);
+
+        ApplyButtons(buttonsMask);
         CopyInputFromJoinedController();
 
         if (_calibrateSticks)
@@ -426,6 +438,9 @@ public class Switch2Device : IControllerDevice
             Set(Joycon.Button.Plus, Ns2Protocol.BtnPlus);
             Set(Joycon.Button.Capture, Ns2Protocol.BtnCapture);
             Set(Joycon.Button.Stick, Ns2Protocol.BtnLStick);
+            Set(Joycon.Button.Chat, Ns2Protocol.BtnC);
+            Set(Joycon.Button.Gl, Ns2Protocol.BtnGl);
+            Set(Joycon.Button.Gr, Ns2Protocol.BtnGr);
         }
         else if (IsJoycon)
         {
@@ -444,6 +459,9 @@ public class Switch2Device : IControllerDevice
             Set(Joycon.Button.Plus, Ns2Protocol.BtnPlus);
             Set(Joycon.Button.Capture, Ns2Protocol.BtnCapture);
             Set(Joycon.Button.Stick, Ns2Protocol.BtnRStick);
+            Set(Joycon.Button.Chat, Ns2Protocol.BtnC);
+            Set(Joycon.Button.Gl, Ns2Protocol.BtnGl);
+            Set(Joycon.Button.Gr, Ns2Protocol.BtnGr);
         }
         else
         {
@@ -466,7 +484,84 @@ public class Switch2Device : IControllerDevice
             Set(Joycon.Button.Capture, Ns2Protocol.BtnCapture);
             Set(Joycon.Button.Stick, Ns2Protocol.BtnLStick);
             Set(Joycon.Button.Stick2, Ns2Protocol.BtnRStick);
+            Set(Joycon.Button.Chat, Ns2Protocol.BtnC);
+            Set(Joycon.Button.Gl, Ns2Protocol.BtnGl);
+            Set(Joycon.Button.Gr, Ns2Protocol.BtnGr);
         }
+    }
+
+    // Joy-Con 2 can rest on a surface and act as an optical mouse: the sensor
+    // reports a distance (<1000, on a surface) and accumulated 16-bit
+    // coordinates whose deltas move the cursor. While active, the buttons used
+    // as mouse clicks are masked off so they don't reach the virtual pad.
+    private void ProcessOpticalMouse(in Ns2Protocol.Ns2Input input, ref uint mask)
+    {
+        if (!IsJoycon)
+        {
+            return;
+        }
+
+        var active = input.MouseDistance != 0 && input.MouseDistance < 1000 && input.MouseRoughness < 4000;
+        if (!active)
+        {
+            _mouseActive = false;
+            return;
+        }
+
+        if (_mouseActive)
+        {
+            var dx = SignedLoopingDifference16(_prevMouseX, input.MouseX);
+            var dy = SignedLoopingDifference16(_prevMouseY, input.MouseY);
+            if (dx != 0 || dy != 0)
+            {
+                WindowsInput.Simulate.Events()
+                    .MoveBy(
+                        (int)(dx * Config.GyroMouseSensitivity[0]),
+                        (int)(dy * Config.GyroMouseSensitivity[1]))
+                    .Invoke();
+            }
+
+            var left = (mask & (Ns2Protocol.BtnZl | Ns2Protocol.BtnZr)) != 0;
+            var right = (mask & (Ns2Protocol.BtnL | Ns2Protocol.BtnR)) != 0;
+            var middle = (mask & (Ns2Protocol.BtnLStick | Ns2Protocol.BtnRStick)) != 0;
+            if (left != _prevMouseL)
+            {
+                (left ? WindowsInput.Simulate.Events().Hold(ButtonCode.Left) : WindowsInput.Simulate.Events().Release(ButtonCode.Left)).Invoke();
+            }
+            if (right != _prevMouseR)
+            {
+                (right ? WindowsInput.Simulate.Events().Hold(ButtonCode.Right) : WindowsInput.Simulate.Events().Release(ButtonCode.Right)).Invoke();
+            }
+            if (middle != _prevMouseM)
+            {
+                (middle ? WindowsInput.Simulate.Events().Hold(ButtonCode.Middle) : WindowsInput.Simulate.Events().Release(ButtonCode.Middle)).Invoke();
+            }
+            _prevMouseL = left;
+            _prevMouseR = right;
+            _prevMouseM = middle;
+
+            mask &= ~(Ns2Protocol.BtnZl | Ns2Protocol.BtnZr | Ns2Protocol.BtnL | Ns2Protocol.BtnR |
+                      Ns2Protocol.BtnLStick | Ns2Protocol.BtnRStick);
+        }
+
+        _prevMouseX = input.MouseX;
+        _prevMouseY = input.MouseY;
+        _mouseActive = true;
+    }
+
+    private static int SignedLoopingDifference16(int previous, int current)
+    {
+        var diff = current - previous;
+        if (diff > 0x8000)
+        {
+            diff -= 0x10000;
+        }
+        else if (diff < -0x8000)
+        {
+            diff += 0x10000;
+        }
+
+        return diff;
     }
 
     private void CopyInputFromJoinedController()
@@ -829,7 +924,7 @@ public class Switch2Device : IControllerDevice
                 output.Share = buttons[(int)Joycon.Button.Capture];
                 output.Options = buttons[(int)Joycon.Button.Plus];
                 output.Ps = buttons[(int)Joycon.Button.Home];
-                output.Touchpad = buttons[(int)Joycon.Button.Minus];
+                output.Touchpad = buttons[(int)Joycon.Button.Minus] | buttons[(int)Joycon.Button.Chat];
 
                 output.ShoulderLeft = buttons[(int)(isLeft ? Joycon.Button.Shoulder1 : Joycon.Button.Shoulder21)];
                 output.ShoulderRight = buttons[(int)(isLeft ? Joycon.Button.Shoulder21 : Joycon.Button.Shoulder1)];
@@ -874,15 +969,16 @@ public class Switch2Device : IControllerDevice
             output.Share = buttons[(int)Joycon.Button.Capture];
             output.Options = buttons[(int)Joycon.Button.Plus];
             output.Ps = buttons[(int)Joycon.Button.Home];
-            output.Touchpad = buttons[(int)Joycon.Button.Minus];
+            output.Touchpad = buttons[(int)Joycon.Button.Minus] | buttons[(int)Joycon.Button.Chat];
 
             output.ShoulderLeft = buttons[(int)Joycon.Button.Shoulder1];
             output.ShoulderRight = buttons[(int)Joycon.Button.Shoulder21];
             output.TriggerLeft = buttons[(int)Joycon.Button.Shoulder2];
             output.TriggerRight = buttons[(int)Joycon.Button.Shoulder22];
 
-            output.ThumbLeft = buttons[(int)Joycon.Button.Stick];
-            output.ThumbRight = buttons[(int)Joycon.Button.Stick2];
+            // Pro 2 back paddles default to the stick clicks (remappable).
+            output.ThumbLeft = buttons[(int)Joycon.Button.Stick] | buttons[(int)Joycon.Button.Gl];
+            output.ThumbRight = buttons[(int)Joycon.Button.Stick2] | buttons[(int)Joycon.Button.Gr];
         }
 
         if (swapAB)
@@ -940,7 +1036,7 @@ public class Switch2Device : IControllerDevice
                 output.DpadLeft = buttons[(int)(isLeft ? Joycon.Button.DpadLeft : Joycon.Button.Y)];
                 output.DpadRight = buttons[(int)(isLeft ? Joycon.Button.DpadRight : Joycon.Button.A)];
 
-                output.Back = buttons[(int)Joycon.Button.Minus];
+                output.Back = buttons[(int)Joycon.Button.Minus] | buttons[(int)Joycon.Button.Chat];
                 output.Start = buttons[(int)Joycon.Button.Plus];
                 output.Guide = buttons[(int)Joycon.Button.Home];
 
@@ -960,7 +1056,7 @@ public class Switch2Device : IControllerDevice
                 output.X = buttons[(int)(isLeft ? Joycon.Button.DpadUp : Joycon.Button.DpadDown)];
                 output.Y = buttons[(int)(isLeft ? Joycon.Button.DpadRight : Joycon.Button.DpadLeft)];
 
-                output.Back = buttons[(int)Joycon.Button.Minus] | buttons[(int)Joycon.Button.Home];
+                output.Back = buttons[(int)Joycon.Button.Minus] | buttons[(int)Joycon.Button.Home] | buttons[(int)Joycon.Button.Chat];
                 output.Start = buttons[(int)Joycon.Button.Plus] | buttons[(int)Joycon.Button.Capture];
 
                 output.ShoulderLeft = buttons[(int)Joycon.Button.SL];
@@ -984,15 +1080,15 @@ public class Switch2Device : IControllerDevice
             output.DpadLeft = buttons[(int)Joycon.Button.DpadLeft];
             output.DpadRight = buttons[(int)Joycon.Button.DpadRight];
 
-            output.Back = buttons[(int)Joycon.Button.Minus];
+            output.Back = buttons[(int)Joycon.Button.Minus] | buttons[(int)Joycon.Button.Chat];
             output.Start = buttons[(int)Joycon.Button.Plus];
             output.Guide = buttons[(int)Joycon.Button.Home];
 
             output.ShoulderLeft = buttons[(int)Joycon.Button.Shoulder1];
             output.ShoulderRight = buttons[(int)Joycon.Button.Shoulder21];
 
-            output.ThumbStickLeft = buttons[(int)Joycon.Button.Stick];
-            output.ThumbStickRight = buttons[(int)Joycon.Button.Stick2];
+            output.ThumbStickLeft = buttons[(int)Joycon.Button.Stick] | buttons[(int)Joycon.Button.Gl];
+            output.ThumbStickRight = buttons[(int)Joycon.Button.Stick2] | buttons[(int)Joycon.Button.Gr];
 
             output.TriggerLeft = buttons[(int)Joycon.Button.Shoulder2] ? (byte)255 : _sliderVal[0];
             output.TriggerRight = buttons[(int)Joycon.Button.Shoulder22] ? (byte)255 : _sliderVal[1];
