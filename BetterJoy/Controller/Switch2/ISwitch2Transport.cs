@@ -25,6 +25,14 @@ internal interface ISwitch2Transport : IDisposable
     /// <summary>Opens the link and runs the Switch 2 initialization sequence.</summary>
     Task ConnectAsync(CancellationToken ct);
 
+    /// <summary>
+    /// BLE only: bonds the controller to this host (0x15 MAC + LTK exchange),
+    /// needed when the link came from an unpaired advertisement so the
+    /// controller does not power off when its pairing window closes.
+    /// USB transports are no-ops.
+    /// </summary>
+    Task PairHostAsync(byte[] hostMac, CancellationToken ct);
+
     /// <summary>Sends a command frame and waits for its reply; returns the full reply frame.</summary>
     Task<byte[]> SendCommandAsync(byte command, byte subcommand, ReadOnlyMemory<byte> data, CancellationToken ct);
 

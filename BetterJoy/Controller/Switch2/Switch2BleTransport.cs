@@ -25,6 +25,8 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
     private readonly ILogger? _logger;
     private readonly BluetoothLEDevice _device;
     private readonly ushort _productId;
+    private readonly bool _needsHostPair;
+    private readonly byte[] _hostMac;
     private readonly SemaphoreSlim _commandLock = new(1, 1);
     private readonly ConcurrentDictionary<byte, TaskCompletionSource<byte[]>> _pendingCommands = new();
 
@@ -45,12 +47,15 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
     public event EventHandler<byte[]>? InputReportReceived;
     public event EventHandler? LinkDropped;
 
-    public Switch2BleTransport(BluetoothLEDevice device, ushort productId, byte[] mac, ILogger? logger)
+    public Switch2BleTransport(BluetoothLEDevice device, ushort productId, byte[] mac, ILogger? logger,
+        bool needsHostPair = false, byte[]? hostMac = null)
     {
         _device = device;
         _productId = productId;
         Mac = mac;
         _logger = logger;
+        _needsHostPair = needsHostPair;
+        _hostMac = hostMac ?? [];
     }
 
     private void Log(string msg, LogLevel level = LogLevel.Debug) => _logger?.Log($"[BLE] {msg}", level);
@@ -127,6 +132,20 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         Log("Subscribed to input report characteristic.");
 
         await RunInitSequenceAsync(ct);
+
+        // Unpaired advertisement link: bond to the host now (Switch2Connect's
+        // pair()) or the controller powers off when its pairing window ends.
+        if (_needsHostPair && _hostMac.Length >= 6)
+        {
+            try
+            {
+                await PairHostAsync(_hostMac, ct);
+            }
+            catch (Exception e)
+            {
+                Log($"Host pairing failed: {e.Message}", LogLevel.Warning);
+            }
+        }
 
         // Joy-Con 2 + GameCube only (not Pro 2): raw write selects input format 3.
         if (_productId is Ns2Protocol.PidJoycon2Left or Ns2Protocol.PidJoycon2Right
@@ -209,6 +228,17 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         }
     }
 
+    public async Task PairHostAsync(byte[] hostMac, CancellationToken ct)
+    {
+        Log("Host pairing (MAC + LTK)...");
+        // Order mirrors Switch2Connect: SET_MAC(15:01), LTK1(15:04), LTK2(15:02), FINISH(15:03).
+        await SendCommandAsync(0x15, 0x01, Ns2Protocol.BuildPairSetMac(hostMac), ct);
+        await SendCommandAsync(0x15, 0x04, Ns2Protocol.PairLtk1, ct);
+        await SendCommandAsync(0x15, 0x02, Ns2Protocol.PairLtk2, ct);
+        await SendCommandAsync(0x15, 0x03, new byte[] { 0x00 }, ct);
+        Log("Host pairing complete.");
+    }
+
     private async Task SubscribeAsync(
         GattCharacteristic characteristic,
         TypedEventHandler<GattCharacteristic, GattValueChangedEventArgs> handler,
@@ -250,9 +280,16 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
             return;
         }
 
+        var previewLen = Math.Min(8, data.Length);
+        Log($"Response char: {Convert.ToHexString(data.AsSpan(0, previewLen))} ({data.Length}B)");
+
         if (_pendingCommands.TryRemove(data[0], out var tcs))
         {
             tcs.TrySetResult(data);
+        }
+        else
+        {
+            Log($"Unmatched response (id {data[0]:X2}).");
         }
     }
 

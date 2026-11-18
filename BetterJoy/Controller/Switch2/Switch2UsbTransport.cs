@@ -305,6 +305,13 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
         }
     }
 
+    public Task PairHostAsync(byte[] hostMac, CancellationToken ct)
+    {
+        // USB links are host-bound already; the GC init sequence carries its
+        // own MAC/LTK exchange.
+        return Task.CompletedTask;
+    }
+
     public async Task<byte[]> SendCommandAsync(byte command, byte subcommand, ReadOnlyMemory<byte> data, CancellationToken ct)
     {
         var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -165,6 +165,22 @@ internal static class Ns2Protocol
     // (Joy-Con 2 and GameCube only, NOT Pro 2) plus button mask 0x03FFFFFF.
     public static readonly byte[] InputFormat3Frame = [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x30];
 
+    // Host pairing LTK payloads (0x15 subcommands), from Switch2Connect's pair().
+    public static readonly byte[] PairLtk1 =
+        [0x00, 0xEA, 0xBD, 0x47, 0x13, 0x89, 0x35, 0x42, 0xC6, 0x79, 0xEE, 0x07, 0xF2, 0x53, 0x2C, 0x6C, 0x31];
+    public static readonly byte[] PairLtk2 =
+        [0x00, 0x40, 0xB0, 0x8A, 0x5F, 0xCD, 0x1F, 0x9B, 0x41, 0x12, 0x5C, 0xAC, 0xC6, 0x3F, 0x38, 0xA0, 0x73];
+
+    public static byte[] BuildPairSetMac(byte[] hostMac)
+    {
+        // 0x15:01 data = 00 02 + host MAC (LE) repeated twice.
+        var data = new byte[14];
+        data[1] = 0x02;
+        Buffer.BlockCopy(hostMac, 0, data, 2, 6);
+        Buffer.BlockCopy(hostMac, 0, data, 8, 6);
+        return data;
+    }
+
     /// <summary>
     /// BLE initialization sequence, in order. Verified against Switch2Connect.
     /// The (0x01, 0x01) step must be skipped on the Pro 2 (it returns status=4).

@@ -220,7 +220,14 @@ internal sealed class Switch2Manager : IDisposable
                 mac[i] = (byte)(address >> (8 * (5 - i)));
             }
 
-            var transport = new Switch2BleTransport(device, productId, mac, _logger);
+            // Unpaired link (sync-button advertisement): the controller drops the
+            // connection when its pairing window closes unless the host bonds to
+            // it in-protocol (0x15 MAC/LTK). Host MAC comes from the default radio.
+            var needsHostPair = !(device.DeviceInformation?.Pairing?.IsPaired ?? false);
+            var hostMac = needsHostPair ? await GetHostMacAsync() : [];
+
+            var transport = new Switch2BleTransport(
+                device, productId, mac, _logger, needsHostPair, hostMac);
 
             var type = Ns2Protocol.TryGetControllerType(productId, out var t)
                 ? t
@@ -245,6 +252,31 @@ internal sealed class Switch2Manager : IDisposable
         finally
         {
             _connecting.TryRemove(address, out _);
+        }
+    }
+
+    private async Task<byte[]> GetHostMacAsync()
+    {
+        try
+        {
+            var adapter = await BluetoothAdapter.GetDefaultAsync();
+            if (adapter == null || adapter.BluetoothAddress == 0)
+            {
+                return [];
+            }
+
+            var mac = new byte[6];
+            var addr = adapter.BluetoothAddress;
+            for (var i = 0; i < 6; i++)
+            {
+                mac[i] = (byte)(addr >> (8 * i)); // little-endian, as the protocol wants
+            }
+            return mac;
+        }
+        catch (Exception e)
+        {
+            _logger?.Log($"Host BT adapter MAC unavailable: {e.Message}", LogLevel.Debug);
+            return [];
         }
     }
 
