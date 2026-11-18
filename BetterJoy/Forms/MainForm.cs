@@ -357,7 +357,7 @@ public partial class MainForm : Form
         lb_github.LinkVisited = true;
         Process.Start(new ProcessStartInfo
         {
-            FileName = "https://github.com/d3xMachina/BetterJoy",
+            FileName = "https://github.com/undecimer/BetterJoy2",
             UseShellExecute = true
         });
     }

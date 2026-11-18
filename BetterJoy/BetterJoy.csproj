@@ -9,10 +9,10 @@
         <AssemblyName>BetterJoy</AssemblyName>
         <ApplicationIcon>Icons\betterjoy_icon.ico</ApplicationIcon>
         <StartupObject>BetterJoy.Program</StartupObject>
-        <AssemblyVersion>8.5.0</AssemblyVersion>
+        <AssemblyVersion>9.0.0</AssemblyVersion>
         <FileVersion>$(AssemblyVersion)</FileVersion>
         <Version>$(AssemblyVersion)</Version>
-        <Copyright>Copyright © 2024</Copyright>
+        <Copyright>Copyright © 2024-2026</Copyright>
 		<ZipFileName>$(MSBuildProjectName).zip</ZipFileName>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<NeutralLanguage>en</NeutralLanguage>
@@ -102,7 +102,7 @@
 
 		<!-- Create the ZIP file using PowerShell (Windows) or zip (non-Windows) -->
 		<Exec Condition="'$(OS)' == 'Windows_NT'" Command="powershell -NoProfile -Command &quot;Get-ChildItem -Path '$(PublishDir)' -Exclude '$(MSBuildProjectName).pdb', '$(ZipFileName)' | Compress-Archive -DestinationPath '$(PublishDir)$(ZipFileName)' -Force&quot;" />
-		<Exec Condition="'$(OS)' != 'Windows_NT'" Command="zip -r '$(PublishDir)$(ZipFileName)' '$(PublishDir)' -x '$(MSBuildProjectName).pdb' '$(ZipFileName)'" />
+		<Exec Condition="'$(OS)' != 'Windows_NT'" Command="cd '$(PublishDir)' &amp;&amp; rm -f '$(ZipFileName)' &amp;&amp; zip -r '$(ZipFileName)' . -x '$(MSBuildProjectName).pdb' '$(ZipFileName)'" />
 
 		<Message Text="Zipped publish output to $(PublishDir)$(ZipFileName)" Importance="high" />
 	</Target>
