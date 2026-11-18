@@ -209,7 +209,7 @@ internal static class Ns2Protocol
             // pair (0x11:03, 0x0A:08) over BLE: real hardware goes silent on the
             // whole command channel when 0A:08 arrives, then drops the link.
             // Switch2Connect only sends them for the NSO GameCube controller.
-            steps.RemoveAll(s => s is { Command: 0x11, Sub: 0x03 } or { Command: 0x0A, Sub: 0x08 });
+            steps.RemoveAll(s => s is { Item1: 0x11, Item2: 0x03 } or { Item1: 0x0A, Item2: 0x08 });
         }
         else
         {
