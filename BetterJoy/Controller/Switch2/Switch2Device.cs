@@ -12,6 +12,7 @@ using BetterJoy.Hardware.SubCommand;
 using BetterJoy.Logging;
 using BetterJoy.Forms;
 using BetterJoy.Network;
+using BetterJoy.Network.Server;
 using Nefarius.ViGEm.Client.Targets.DualShock4;
 using Nefarius.ViGEm.Client.Targets.Xbox360;
 
@@ -51,6 +52,9 @@ public class Switch2Device : IControllerDevice
     private bool _userCalibrated;
 
     private Motion _motion = new();
+    private readonly MadgwickAHRS _AHRS; // filtered rotation (DCM) for motion features and UDP gyro consumers
+    private readonly float[] _curRotation = [0, 0, 0, 0, 0, 0];
+    private long _lastMotionTicks;
     private Joycon.Status _state = Joycon.Status.NotAttached;
     private bool _isLeft;
     private bool _calibrateMotion;
@@ -130,6 +134,7 @@ public class Switch2Device : IControllerDevice
         _isLeft = type is Joycon.ControllerType.Joycon2Left;
 
         Config = new ControllerConfig(logger);
+        _AHRS = new MadgwickAHRS(0.014f, Config.AHRSBeta);
         SerialOrMac = serial;
 
         var mac = transport.Mac;
@@ -237,23 +242,19 @@ public class Switch2Device : IControllerDevice
 
     private async Task<StickLimitsCalibration?> ReadStickCalibrationAsync(uint userAddr, uint factoryAddr, bool isLeft, CancellationToken ct)
     {
-        // User calibration: a leading 0xFF FF FF marker means absent -> factory data.
+        // User calibration (11 bytes read at +2 past the magic): a leading
+        // 0xFF FF FF marker means absent -> factory data. Verified layout:
+        // parse calib triplets from the first 9 bytes of the record.
         var user = await _transport.ReadMemoryAsync(Ns2Protocol.StickCalibLen, userAddr, ct);
-        if (user.Length >= 12 && !(user[0] == 0xFF && user[1] == 0xFF && user[2] == 0xFF) &&
-            Ns2Protocol.TryParseStickCalibration(user.AsSpan(3), out var userVals))
+        if (Ns2Protocol.TryParseStickCalibration(user, out var userVals))
         {
             return new StickLimitsCalibration(userVals, isLeft);
         }
 
         var factory = await _transport.ReadMemoryAsync(Ns2Protocol.StickCalibLen, factoryAddr, ct);
-        if (factory.Length >= 12 && Ns2Protocol.TryParseStickCalibration(factory.AsSpan(3), out var factoryVals))
+        if (Ns2Protocol.TryParseStickCalibration(factory, out var factoryVals))
         {
             return new StickLimitsCalibration(factoryVals, isLeft);
-        }
-
-        if (factory.Length >= 9 && Ns2Protocol.TryParseStickCalibration(factory, out var factoryVals2))
-        {
-            return new StickLimitsCalibration(factoryVals2, isLeft);
         }
 
         return null;
@@ -340,6 +341,13 @@ public class Switch2Device : IControllerDevice
         Timestamp = (ulong)DateTime.UtcNow.Ticks;
         PacketCounter++;
 
+        // First report carrying IMU data: enables the calibration countdown
+        // (MainForm requires Status.MotionDataOk before collecting samples).
+        if (_state == Joycon.Status.Attached && input.HasMotion)
+        {
+            SetState(Joycon.Status.MotionDataOk);
+        }
+
         Array.Clear(_buttons);
         ApplyButtons(input.Buttons);
         CopyInputFromJoinedController();
@@ -366,10 +374,26 @@ public class Switch2Device : IControllerDevice
         SimulateRemappedButtons();
         ReleaseRemappedButtons();
 
-        if (Other == null)
+        // When joined, the left Joy-Con 2 owns the single virtual controller
+        // (same convention as Joycon's mainController.UpdateInput()); a right
+        // joycon's report merges its input into the left, which pushes it.
+        var main = Other != null && !IsLeft ? Other : this;
+        main.UpdateInput();
+        main.SendMotionReport();
+    }
+
+    private void SendMotionReport()
+    {
+        if (Program.Server == null || !Program.Server.HasClients)
         {
-            UpdateInput();
+            return;
         }
+
+        var controllerReport = new UdpControllerReport(this);
+        controllerReport.AddMotion(this, 0);
+        // Added last so the packet carries the remapped state.
+        controllerReport.AddInput(this);
+        Program.Server.SendControllerReport(controllerReport);
     }
 
     private void ApplyButtons(uint mask)
@@ -535,15 +559,36 @@ public class Switch2Device : IControllerDevice
         const float accelPerG = 4096f;
         var gyroPerDps = IsPro || IsGameCube ? 14.2857f : 16.384f;
 
+        // Gyroscope in deg/s, accelerometer in g — same convention as Joycon
+        // and what the DSU/Cemuhook packet expects.
         _motion = new Motion(
             new Vector3(
                 input.GyroX / gyroPerDps,
                 input.GyroY / gyroPerDps,
-                input.GyroZ / gyroPerDps) * (MathF.PI / 180f),
+                input.GyroZ / gyroPerDps),
             new Vector3(
                 input.AccelX / accelPerG,
                 input.AccelY / accelPerG,
                 input.AccelZ / accelPerG));
+
+        // Feed the Madgwick filter (gyro in rad/s, accel in g).
+        var now = Timestamp != 0 ? (long)Timestamp : DateTime.UtcNow.Ticks;
+        if (_lastMotionTicks != 0)
+        {
+            _AHRS.SamplePeriod = Math.Clamp((now - _lastMotionTicks) / (float)TimeSpan.TicksPerSecond, 0.001f, 0.1f);
+        }
+        _lastMotionTicks = now;
+
+        const float degToRad = 0.0174533f;
+        _AHRS.Update(
+            _motion.Gyroscope.X * degToRad,
+            _motion.Gyroscope.Y * degToRad,
+            _motion.Gyroscope.Z * degToRad,
+            _motion.Accelerometer.X,
+            _motion.Accelerometer.Y,
+            _motion.Accelerometer.Z
+        );
+        _AHRS.GetEulerAngles(_curRotation);
 
         if (_calibrateMotion)
         {
@@ -1014,7 +1059,13 @@ public class Switch2Device : IControllerDevice
         }
     }
 
-    public bool SetLEDByPadID() => SetLEDByPlayerNum(PadId + 1);
+    public bool SetLEDByPadID()
+    {
+        // Pad ids are 0-based (LED pattern indexes); joined joycons share the
+        // pair's lowest pad id, same as Joycon.SetLEDByPadID.
+        var id = IsJoined && Other != null ? Math.Min(Other.PadId, PadId) : PadId;
+        return SetLEDByPlayerNum(id);
+    }
 
     public void RequestSetLEDByPadID()
     {

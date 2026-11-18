@@ -34,6 +34,7 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
     private GattCharacteristic? _rumbleChar;
     private GattDeviceService? _service;
     private CancellationTokenSource? _keepAliveCts;
+    private Task? _keepAliveTask;
     private volatile bool _rumbleOn;
     private int _rumbleCounter;
     private bool _disposed;
@@ -141,7 +142,7 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         var keepAliveChar = _rumbleChar ?? _commandChar;
         _keepAliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var keepAliveToken = _keepAliveCts.Token;
-        _ = Task.Run(async () =>
+        _keepAliveTask = Task.Run(async () =>
         {
             while (!keepAliveToken.IsCancellationRequested)
             {
@@ -304,6 +305,14 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
     public async Task StopAsync()
     {
         _keepAliveCts?.Cancel();
+
+        // Give an in-flight keep-alive write time to finish before the
+        // service/device is closed underneath it.
+        if (_keepAliveTask != null)
+        {
+            await Task.WhenAny(_keepAliveTask, Task.Delay(300));
+        }
+
         _device.ConnectionStatusChanged -= OnConnectionStatusChanged;
 
         foreach (var c in new[] { _inputChar, _responseChar })

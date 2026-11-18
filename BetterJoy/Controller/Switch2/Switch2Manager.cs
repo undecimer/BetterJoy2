@@ -257,16 +257,17 @@ internal sealed class Switch2Manager : IDisposable
             }
 
             var read = await chars.Characteristics[0].ReadValueAsync(BluetoothCacheMode.Uncached);
-            if (read.Status != GattCommunicationStatus.Success || read.Value.Length < 8)
+            if (read.Status != GattCommunicationStatus.Success || read.Value.Length < 7)
             {
                 return 0;
             }
 
-            // PnP ID: vid[1:3] pid[5:7] — little endian fields
+            // PnP ID (0x2A50), 7 bytes: [0]=vendorIdSource, [1:3]=VID,
+            // [3:5]=product ID, [5:7]=version — little-endian fields.
             var buf = new byte[read.Value.Length];
             Windows.Storage.Streams.DataReader.FromBuffer(read.Value).ReadBytes(buf);
 
-            return (ushort)(buf[5] | (buf[6] << 8));
+            return (ushort)(buf[3] | (buf[4] << 8));
         }
         catch
         {

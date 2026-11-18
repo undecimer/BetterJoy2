@@ -337,15 +337,20 @@ internal static class Ns2Protocol
             return false;
         }
 
-        // USB reports carry a leading report ID byte; BLE notifications do not.
-        if (report[0] is 0x21 or 0x02)
+        // USB reports carry a leading report ID byte; BLE notifications do
+        // not, so there report[0] is just the packet counter and may hold any
+        // value (a 63-byte payload must never be re-interpreted as an ID).
+        if (report.Length > StandardReportLen)
         {
-            return false; // subcommand / SPI reply
-        }
+            if (report[0] is 0x21 or 0x02)
+            {
+                return false; // subcommand / SPI reply
+            }
 
-        if (report[0] is 0x30 or 0x31 or 0x05 or 0x01 or 0xA1)
-        {
-            report = report[1..];
+            if (report[0] is 0x30 or 0x31 or 0x05 or 0x01 or 0xA1)
+            {
+                report = report[1..];
+            }
         }
 
         if (gameCubeLayout)
@@ -494,8 +499,8 @@ internal static class Ns2Protocol
     }
 
     /// <summary>
-    /// Parses factory stick calibration (9 payload bytes after the 3-byte SPI prefix):
-    /// center = bytes[0:3], max = [3:6], min = [6:9], each a 12-bit pair.
+    /// Parses a stick calibration record (first 9 bytes, 12-bit pairs):
+    /// center = [0:3], min = [3:6], max = [6:9] — verified in Switch2Connect.
     /// Returns values ordered for StickLimitsCalibration: [maxX, maxY, centerX, centerY, minX, minY].
     /// </summary>
     public static bool TryParseStickCalibration(ReadOnlySpan<byte> payload, out ushort[] values)
@@ -509,10 +514,23 @@ internal static class Ns2Protocol
 
         values =
         [
-            Unpack12X(payload, 3), Unpack12Y(payload, 3), // max
+            Unpack12X(payload, 6), Unpack12Y(payload, 6), // max (absolute range above center)
             Unpack12X(payload, 0), Unpack12Y(payload, 0), // center
-            Unpack12X(payload, 6), Unpack12Y(payload, 6), // min
+            Unpack12X(payload, 3), Unpack12Y(payload, 3), // min (absolute range below center)
         ];
+
+        // Garbage reads (failed bridges, uninitialized GC records) must not
+        // pin a stick to an extreme: reject implausible centers and ranges.
+        var centerX = values[2];
+        var centerY = values[3];
+        if (centerX is < 1024 or > 3072 || centerY is < 1024 or > 3072 ||
+            values[0] == 0 || values[1] == 0 || values[4] == 0 || values[5] == 0 ||
+            values[0] > 4095 - centerX || values[1] > 4095 - centerY ||
+            values[4] > centerX || values[5] > centerY)
+        {
+            values = [];
+            return false;
+        }
 
         return true;
     }
