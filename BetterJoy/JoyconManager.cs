@@ -306,11 +306,10 @@ public class JoyconManager
 
         var isUSB = info.BusType == BusType.USB;
 
-        // Switch 2 pads enumerate extra HID collections (vendor iface MI_01
-        // shows up as a second device path) — only the gamepad/joystick
-        // collection on interface 0 is a real controller instance.
-        if (Ns2Protocol.IsSwitch2Type(type) &&
-            !(info.UsagePage == 0x01 && info.Usage is 0x04 or 0x05))
+        // Switch 2 pads enumerate extra HID interfaces (vendor MI_01 also
+        // reports a gamepad usage) — only interface 0 is a real controller
+        // instance; the rest are command/utility endpoints.
+        if (Ns2Protocol.IsSwitch2Type(type) && info.InterfaceNumber > 0)
         {
             return;
         }
