@@ -26,6 +26,7 @@ namespace BetterJoy.Controller.Switch2;
 public class Switch2Device : IControllerDevice
 {
     private readonly ILogger? _logger;
+    private readonly MainForm _form;
     private readonly ISwitch2Transport _transport;
 
     public ControllerConfig Config { get; }
@@ -55,6 +56,9 @@ public class Switch2Device : IControllerDevice
     private readonly MadgwickAHRS _AHRS; // filtered rotation (DCM) for motion features and UDP gyro consumers
     private readonly float[] _curRotation = [0, 0, 0, 0, 0, 0];
     private long _lastMotionTicks;
+    private bool _motionCalibrated;
+    private ThreeAxisShort _motionNeutralGyro;
+    private ThreeAxisShort _motionNeutralAccel;
     private Joycon.Status _state = Joycon.Status.NotAttached;
     private bool _isLeft;
     private bool _calibrateMotion;
@@ -124,6 +128,7 @@ public class Switch2Device : IControllerDevice
         bool isThirdParty = false)
     {
         _logger = logger;
+        _form = form;
         _transport = transport;
         Path = path;
         SerialNumber = serial;
@@ -338,7 +343,8 @@ public class Switch2Device : IControllerDevice
             return;
         }
 
-        Timestamp = (ulong)DateTime.UtcNow.Ticks;
+        // DSU timestamps are microseconds (ticks are 100 ns each).
+        Timestamp = (ulong)(DateTime.UtcNow.Ticks / 10);
         PacketCounter++;
 
         // First report carrying IMU data: enables the calibration countdown
@@ -379,10 +385,12 @@ public class Switch2Device : IControllerDevice
         // joycon's report merges its input into the left, which pushes it.
         var main = Other != null && !IsLeft ? Other : this;
         main.UpdateInput();
-        main.SendMotionReport();
+        SendMotionReport(main);
     }
 
-    private void SendMotionReport()
+    // Each device reports its own motion and pad id; when joined, the input
+    // is the merged state owned by the left (main) device.
+    private void SendMotionReport(Switch2Device inputSource)
     {
         if (Program.Server == null || !Program.Server.HasClients)
         {
@@ -392,7 +400,7 @@ public class Switch2Device : IControllerDevice
         var controllerReport = new UdpControllerReport(this);
         controllerReport.AddMotion(this, 0);
         // Added last so the packet carries the remapped state.
-        controllerReport.AddInput(this);
+        controllerReport.AddInput(inputSource);
         Program.Server.SendControllerReport(controllerReport);
     }
 
@@ -560,16 +568,19 @@ public class Switch2Device : IControllerDevice
         var gyroPerDps = IsPro || IsGameCube ? 14.2857f : 16.384f;
 
         // Gyroscope in deg/s, accelerometer in g — same convention as Joycon
-        // and what the DSU/Cemuhook packet expects.
+        // and what the DSU/Cemuhook packet expects. User calibration offsets
+        // (rest-position medians) are subtracted in raw units before scaling.
+        var nG = _motionCalibrated ? _motionNeutralGyro : ThreeAxisShort.Zero;
+        var nA = _motionCalibrated ? _motionNeutralAccel : ThreeAxisShort.Zero;
         _motion = new Motion(
             new Vector3(
-                input.GyroX / gyroPerDps,
-                input.GyroY / gyroPerDps,
-                input.GyroZ / gyroPerDps),
+                (input.GyroX - nG.X) / gyroPerDps,
+                (input.GyroY - nG.Y) / gyroPerDps,
+                (input.GyroZ - nG.Z) / gyroPerDps),
             new Vector3(
-                input.AccelX / accelPerG,
-                input.AccelY / accelPerG,
-                input.AccelZ / accelPerG));
+                (input.AccelX - nA.X) / accelPerG,
+                (input.AccelY - nA.Y) / accelPerG,
+                (input.AccelZ - nA.Z) / accelPerG));
 
         // Feed the Madgwick filter (gyro in rad/s, accel in g).
         var now = Timestamp != 0 ? (long)Timestamp : DateTime.UtcNow.Ticks;
@@ -1102,11 +1113,30 @@ public class Switch2Device : IControllerDevice
 
     public string GetControllerName() => Joycon.GetControllerName(Type);
 
-    public void GetActiveMotionData() { }
+    public void GetActiveMotionData()
+    {
+        var activeMotionData = _form.ActiveCalibrationMotionData(SerialOrMac);
+        if (activeMotionData != null)
+        {
+            _motionNeutralGyro = new ThreeAxisShort(activeMotionData[0], activeMotionData[1], activeMotionData[2]);
+            _motionNeutralAccel = new ThreeAxisShort(activeMotionData[3], activeMotionData[4], activeMotionData[5]);
+            _motionCalibrated = true;
+        }
+        else
+        {
+            _motionCalibrated = false;
+        }
+    }
 
     public void GetActiveSticksData()
     {
-        CalibrationStickDatas.Add(new SticksData(_stickPrecal, _stick2Precal));
+        var activeSticksData = _form.ActiveCaliSticksData(SerialOrMac);
+        if (activeSticksData != null)
+        {
+            _stickCal = new StickLimitsCalibration(activeSticksData.AsSpan(0, 6), true);
+            _stick2Cal = new StickLimitsCalibration(activeSticksData.AsSpan(6, 6), false);
+            _userCalibrated = true;
+        }
     }
 
     public void StartMotionCalibration()
@@ -1141,7 +1171,16 @@ public class Switch2Device : IControllerDevice
 
     public void SetCalibration(bool userCalibration)
     {
-        _userCalibrated = userCalibration;
+        if (userCalibration)
+        {
+            GetActiveMotionData();
+            GetActiveSticksData();
+        }
+        else
+        {
+            _motionCalibrated = false;
+            _userCalibrated = false;
+        }
     }
 
     public void ApplyConfig(bool showErrors = true)
