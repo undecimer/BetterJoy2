@@ -203,18 +203,15 @@ internal static class Ns2Protocol
             (0x01, 0x0C, []),
         };
 
-        if (productId == PidPro2)
-        {
-            // Pro Controller 2 doesn't implement the GameCube IMU/haptic init
-            // pair (0x11:03, 0x0A:08) over BLE: real hardware goes silent on the
-            // whole command channel when 0A:08 arrives, then drops the link.
-            // Switch2Connect only sends them for the NSO GameCube controller.
-            steps.RemoveAll(s => s is { Item1: 0x11, Item2: 0x03 } or { Item1: 0x0A, Item2: 0x08 });
-        }
-        else
+        if (productId != PidPro2)
         {
             steps.Add((0x01, 0x01, [0x00, 0x00, 0x00, 0x00]));
         }
+        // Pro Controller 2 answers 01:01 with status=4 on real hardware, so it is
+        // the only step skipped for it (Switch2Connect does the same). The
+        // 0x11:03/0x0A:08 pair IS sent — 0A:08 enables haptic/report streaming;
+        // skipping it leaves the pad asleep after attach. Its reply can arrive
+        // on an aux notify handle, which the transport now routes.
 
         return steps;
     }
