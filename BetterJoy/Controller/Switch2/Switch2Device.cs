@@ -370,25 +370,26 @@ public class Switch2Device : IControllerDevice
         ProcessOpticalMouse(in input, ref buttonsMask);
 
         ApplyButtons(buttonsMask);
-        CopyInputFromJoinedController();
+        ApplySticks(input);
 
         if (_calibrateSticks)
         {
             CalibrationStickDatas.Add(new SticksData(_stickPrecal, _stick2Precal));
         }
 
-        ApplySticks(input);
         ApplyTriggers(input);
-        ApplyMotion(input);
-        ApplyBattery(input);
 
         // edge tracking for remapping
         // non-analog triggers: full travel when the digital button is pressed
         if (!IsGameCube)
         {
             _sliderVal[0] = _buttons[(int)Joycon.Button.Shoulder2] ? (byte)255 : (byte)0;
-            _sliderVal[1] = _buttons[(int)Joycon.Button.Shoulder22] ? (byte)255 : (byte)0;
+            _sliderVal[1] = _buttons[(int)(IsJoycon && !_isLeft ? Joycon.Button.Shoulder2 : Joycon.Button.Shoulder22)] ? (byte)255 : (byte)0;
         }
+
+        CopyInputFromJoinedController();
+        ApplyMotion(input);
+        ApplyBattery(input);
 
         Array.Copy(_buttons, _buttonsRemapped, _buttons.Length);
         SimulateRemappedButtons();
@@ -655,7 +656,9 @@ public class Switch2Device : IControllerDevice
 
     private void ApplySticks(in Ns2Protocol.Ns2Input input)
     {
-        _stickPrecal = new TwoAxisUShort(input.LeftX, input.LeftY);
+        _stickPrecal = IsJoycon && !_isLeft
+            ? new TwoAxisUShort(input.RightX, input.RightY)
+            : new TwoAxisUShort(input.LeftX, input.LeftY);
         _stick2Precal = new TwoAxisUShort(input.RightX, input.RightY);
 
         var cal = _userCalibrated && _userStickCal != null ? _userStickCal : _stickCal;
@@ -1044,8 +1047,11 @@ public class Switch2Device : IControllerDevice
         output.TriggerLeftValue = _sliderVal[0];
         output.TriggerRightValue = _sliderVal[1];
 
-        output.ThumbLeftX = (byte)Math.Clamp(stick.X * 127 + 128, 0, 255);
-        output.ThumbLeftY = (byte)Math.Clamp(stick.Y * 127 + 128, 0, 255);
+        var stickX = isJoycon && Other == null ? (isLeft ? -1f : 1f) * stick.Y : stick.X;
+        var stickY = isJoycon && Other == null ? (isLeft ? 1f : -1f) * stick.X : stick.Y;
+
+        output.ThumbLeftX = (byte)Math.Clamp(stickX * 127 + 128, 0, 255);
+        output.ThumbLeftY = (byte)Math.Clamp(stickY * 127 + 128, 0, 255);
         output.ThumbRightX = (byte)Math.Clamp(stick2.X * 127 + 128, 0, 255);
         output.ThumbRightY = (byte)Math.Clamp(stick2.Y * 127 + 128, 0, 255);
 
@@ -1154,8 +1160,11 @@ public class Switch2Device : IControllerDevice
             (output.X, output.Y) = (output.Y, output.X);
         }
 
-        output.AxisLeftX = (short)Math.Clamp(stick.X * short.MaxValue, short.MinValue, short.MaxValue);
-        output.AxisLeftY = (short)Math.Clamp(stick.Y * short.MaxValue, short.MinValue, short.MaxValue);
+        var stickX = isJoycon && Other == null ? (isLeft ? -1f : 1f) * stick.Y : stick.X;
+        var stickY = isJoycon && Other == null ? (isLeft ? 1f : -1f) * stick.X : stick.Y;
+
+        output.AxisLeftX = (short)Math.Clamp(stickX * short.MaxValue, short.MinValue, short.MaxValue);
+        output.AxisLeftY = (short)Math.Clamp(stickY * short.MaxValue, short.MinValue, short.MaxValue);
         output.AxisRightX = (short)Math.Clamp(stick2.X * short.MaxValue, short.MinValue, short.MaxValue);
         output.AxisRightY = (short)Math.Clamp(stick2.Y * short.MaxValue, short.MinValue, short.MaxValue);
 

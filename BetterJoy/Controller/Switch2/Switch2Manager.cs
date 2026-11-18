@@ -126,10 +126,13 @@ internal sealed class Switch2Manager : IDisposable
                 return;
             }
 
+            var reconnectMac = data.Length >= 16 ? data[10..16] : null;
+            var isPairingAd = reconnectMac == null || reconnectMac.AsSpan().IndexOfAnyExcept((byte)0) < 0;
+
             // The advertisement's address type must be carried into the connect:
             // NS2 controllers advertise with random addresses, and assuming
             // Public produces a device object that never answers GATT commands.
-            _ = ConnectBleAsync(args.BluetoothAddress, productId, args.BluetoothAddressType, null, _cts.Token);
+            _ = ConnectBleAsync(args.BluetoothAddress, productId, args.BluetoothAddressType, null, isPairingAd, reconnectMac, _cts.Token);
         }
         catch (Exception e)
         {
@@ -155,7 +158,7 @@ internal sealed class Switch2Manager : IDisposable
             // connect; Joy-Con 2 vs Pro 2 is decided inside the transport.
             // FromIdAsync carries the AEP identity (incl. address type), which
             // the raw address alone does not.
-            _ = ConnectBleAsync(address, 0, null, info.Id, ct);
+            _ = ConnectBleAsync(address, 0, null, info.Id, isPairingAd: false, reconnectMac: null, ct);
         }
     }
 
@@ -174,7 +177,7 @@ internal sealed class Switch2Manager : IDisposable
     }
 
     private async Task ConnectBleAsync(ulong address, ushort advertisedPid,
-        BluetoothAddressType? addressType, string? deviceId, CancellationToken ct)
+        BluetoothAddressType? addressType, string? deviceId, bool isPairingAd, byte[]? reconnectMac, CancellationToken ct)
     {
         if (!_connecting.TryAdd(address, 0))
         {
@@ -186,6 +189,17 @@ internal sealed class Switch2Manager : IDisposable
             if (_manager.Controllers.Any(c => c.SerialOrMac.EndsWith($"{address:X12}", StringComparison.OrdinalIgnoreCase)))
             {
                 return;
+            }
+
+            byte[]? cachedHostMac = null;
+            if (advertisedPid != 0 && !isPairingAd && reconnectMac != null)
+            {
+                cachedHostMac = await GetHostMacAsync();
+                if (cachedHostMac.Length == 6 && !reconnectMac.AsSpan().SequenceEqual(cachedHostMac))
+                {
+                    // Paired to a different host (e.g. the user's console) — ignore.
+                    return;
+                }
             }
 
             BluetoothLEDevice? device = deviceId != null
@@ -220,11 +234,14 @@ internal sealed class Switch2Manager : IDisposable
                 mac[i] = (byte)(address >> (8 * (5 - i)));
             }
 
-            // Sync-button advertisement (or not OS-paired): the controller drops
-            // the link when its pairing window closes unless the host bonds to it
-            // in-protocol (0x15 MAC/LTK). Host MAC comes from the default radio.
-            var needsHostPair = advertisedPid != 0 || !(device.DeviceInformation?.Pairing?.IsPaired ?? false);
-            var hostMac = needsHostPair ? await GetHostMacAsync() : [];
+            // Sync-button advertisement (or OS-unpaired enumerated link): the
+            // controller drops the link when its pairing window closes unless
+            // the host bonds to it in-protocol (0x15 MAC/LTK). Reconnect ads
+            // whose reconnect MAC matches this host skip pairing.
+            var needsHostPair = advertisedPid != 0
+                ? isPairingAd
+                : !(device.DeviceInformation?.Pairing?.IsPaired ?? false);
+            var hostMac = needsHostPair ? cachedHostMac ?? await GetHostMacAsync() : [];
             if (needsHostPair && hostMac.Length < 6)
             {
                 _logger?.Log("Switch 2 host pairing skipped: adapter MAC unavailable.", LogLevel.Warning);

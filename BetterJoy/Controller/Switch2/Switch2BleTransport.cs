@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices.WindowsRuntime;
@@ -22,23 +21,32 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
 {
     private const int CommandTimeoutMs = 2000;
 
+    private sealed class PendingCommand(byte command, byte sub, TaskCompletionSource<byte[]> tcs)
+    {
+        public byte Command { get; } = command;
+        public byte Sub { get; } = sub;
+        public TaskCompletionSource<byte[]> Tcs { get; } = tcs;
+    }
+
     private readonly ILogger? _logger;
     private readonly BluetoothLEDevice _device;
     private readonly ushort _productId;
     private readonly bool _needsHostPair;
     private readonly byte[] _hostMac;
     private readonly SemaphoreSlim _commandLock = new(1, 1);
-    private readonly ConcurrentDictionary<byte, TaskCompletionSource<byte[]>> _pendingCommands = new();
-    private readonly HashSet<ushort> _seenNotifyHandles = [];
+    private readonly SemaphoreSlim _rumbleWake = new(0, 1);
+    private readonly List<(GattCharacteristic Characteristic, TypedEventHandler<GattCharacteristic, GattValueChangedEventArgs> Handler)> _subscriptions = [];
 
+    private PendingCommand? _pendingCommand;
     private GattCharacteristic? _inputChar;
     private GattCharacteristic? _commandChar;
     private GattCharacteristic? _responseChar;
     private GattCharacteristic? _rumbleChar;
     private GattDeviceService? _service;
-    private CancellationTokenSource? _keepAliveCts;
-    private Task? _keepAliveTask;
+    private CancellationTokenSource? _rumbleCts;
+    private Task? _rumbleTask;
     private volatile bool _rumbleOn;
+    private int _silenceCount = 3;
     private int _rumbleCounter;
     private bool _disposed;
 
@@ -127,18 +135,11 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
 
         _device.ConnectionStatusChanged += OnConnectionStatusChanged;
 
-        // Subscribe to EVERY notify characteristic: some replies (e.g. Pro 2's
-        // 0A:08) may arrive on a different characteristic than the canonical
-        // response one — routing is by pending command id, not by channel.
-        foreach (var c in chars
-            .Where(c => c.CharacteristicProperties.HasFlag(GattCharacteristicProperties.Notify))
-            .OrderBy(c => c.AttributeHandle))
-        {
-            TypedEventHandler<GattCharacteristic, GattValueChangedEventArgs> handler =
-                ReferenceEquals(c, _responseChar) ? OnCommandResponse : OnAnyNotify;
-            await SubscribeAsync(c, handler, ct);
-            Log($"Subscribed notify handle 0x{c.AttributeHandle:X4} ({c.Uuid}).");
-        }
+        // Subscribe ONLY to the command response characteristic during handshake;
+        // aux notify streams (0x000D, 0x002D) emit counter-prefixed packets that
+        // can collide with command IDs if inspected as command replies.
+        await SubscribeAsync(_responseChar, OnCommandResponse, ct);
+        Log($"Subscribed response handle 0x{_responseChar.AttributeHandle:X4} ({_responseChar.Uuid}).");
 
         // Unpaired advertisement link: bond to the host first (Switch2Connect's
         // pair()). Pro 2 answers query commands unbonded but goes silent on the
@@ -164,38 +165,95 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         {
             var status = await _commandChar.WriteValueWithResultAsync(
                 ((byte[])Ns2Protocol.InputFormat3Frame.Clone()).AsBuffer(),
-                GattWriteOption.WriteWithoutResponse);
+                GetCommandWriteOption(_commandChar));
             if (status.Status != GattCommunicationStatus.Success)
             {
                 Log($"Input format 3 write failed: {status.Status}");
             }
         }
 
-        // Keep-alive / rumble frames at ~15 ms on the rumble characteristic
-        // (falls back to the command characteristic for devices without one).
-        var keepAliveChar = _rumbleChar ?? _commandChar;
-        _keepAliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var keepAliveToken = _keepAliveCts.Token;
-        _keepAliveTask = Task.Run(async () =>
+        // Subscribe to input notifications after handshake. GameCube NSO may
+        // deliver input on another notify characteristic in the SW2 service.
+        await SubscribeAsync(_inputChar, OnInputNotify, ct);
+        Log($"Subscribed input handle 0x{_inputChar.AttributeHandle:X4} ({_inputChar.Uuid}).");
+
+        if (_productId == Ns2Protocol.PidGameCubeNso)
         {
-            while (!keepAliveToken.IsCancellationRequested)
+            foreach (var c in chars
+                .Where(c => c.CharacteristicProperties.HasFlag(GattCharacteristicProperties.Notify)
+                    && !ReferenceEquals(c, _responseChar)
+                    && !ReferenceEquals(c, _inputChar))
+                .OrderBy(c => c.AttributeHandle))
             {
-                try
-                {
-                    await WriteCharAsync(keepAliveChar,
-                        Ns2Protocol.BuildRumbleFrame(_rumbleCounter++, _rumbleOn),
-                        keepAliveToken);
-                }
-                catch (OperationCanceledException) { }
-                catch (Exception e)
-                {
-                    Log($"Keep-alive failed: {e.Message}");
-                }
-                await Task.Delay(15, keepAliveToken).ConfigureAwait(false);
+                await SubscribeAsync(c, OnInputNotify, ct);
+                Log($"Subscribed GameCube extra notify handle 0x{c.AttributeHandle:X4} ({c.Uuid}).");
             }
-        }, keepAliveToken);
+        }
+
+        // Event-driven rumble writer: silent on startup/idle, emits at ~15 ms
+        // while active and sends up to 3 zero-amplitude stop frames when turned off.
+        var rumbleTarget = _productId == Ns2Protocol.PidGameCubeNso
+            ? _commandChar
+            : (_rumbleChar ?? _commandChar);
+        _rumbleCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var rumbleToken = _rumbleCts.Token;
+        _rumbleTask = Task.Run(() => RunRumbleLoopAsync(rumbleTarget, rumbleToken), rumbleToken);
 
         Log("BLE link ready.");
+    }
+
+    private async Task RunRumbleLoopAsync(GattCharacteristic rumbleTarget, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                if (!_rumbleOn && Volatile.Read(ref _silenceCount) >= 3)
+                {
+                    await _rumbleWake.WaitAsync(ct).ConfigureAwait(false);
+                    continue;
+                }
+
+                var active = _rumbleOn;
+                if (!active)
+                {
+                    if (Interlocked.Increment(ref _silenceCount) > 3)
+                    {
+                        continue;
+                    }
+                }
+                else
+                {
+                    Volatile.Write(ref _silenceCount, 0);
+                }
+
+                await WriteCharNoResponseAsync(
+                    rumbleTarget,
+                    Ns2Protocol.BuildBleRumblePayload(_productId, _rumbleCounter++, active));
+
+                await Task.Delay(15, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (ObjectDisposedException)
+            {
+                break;
+            }
+            catch (Exception e)
+            {
+                Log($"Rumble write loop error: {e.Message}");
+                try
+                {
+                    await Task.Delay(15, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+            }
+        }
     }
 
     private async Task RunInitSequenceAsync(CancellationToken ct)
@@ -214,8 +272,8 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
             catch (Exception e)
             {
                 // Switch2Connect tolerates individual init commands the
-                // controller ignores (e.g. Pro 2 and 0A:08); only a run of
-                // consecutive failures means the link itself is dead.
+                // controller ignores; only a run of consecutive failures means
+                // the link itself is dead.
                 Log($"Init step {i + 1}/{seq.Count} (cmd {command:X2}:{sub:X2}) failed: {e.Message}", LogLevel.Warning);
                 if (++consecutiveFailures >= 3)
                 {
@@ -224,18 +282,6 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
                         $"(last: {command:X2}:{sub:X2} at step {i + 1}/{seq.Count}).", e);
                 }
             }
-        }
-
-        // Player LED off until the device is registered and assigned a pad id;
-        // non-critical, so a missed ack is only a warning.
-        Log("Init: player LED off (cmd 09:07)");
-        try
-        {
-            await SendCommandAsync(0x09, 0x07, new byte[] { 0x00 }.Concat(new byte[7]).ToArray(), ct);
-        }
-        catch (Exception e)
-        {
-            Log($"Init LED off (cmd 09:07) failed: {e.Message}", LogLevel.Warning);
         }
     }
 
@@ -255,48 +301,37 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         TypedEventHandler<GattCharacteristic, GattValueChangedEventArgs> handler,
         CancellationToken ct)
     {
-        var status = await characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(
+        var op = characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(
             GattClientCharacteristicConfigurationDescriptorValue.Notify);
+        using var reg = ct.Register(op.Cancel);
+        var status = await op;
         if (status != GattCommunicationStatus.Success)
         {
             throw new InvalidOperationException($"CCCD subscribe failed ({status}) on {characteristic.Uuid}.");
         }
 
         characteristic.ValueChanged += handler;
+        _subscriptions.Add((characteristic, handler));
     }
 
-    private void OnAnyNotify(GattCharacteristic sender, GattValueChangedEventArgs args)
+    private static byte[] ReadBuffer(IBuffer buffer)
     {
-        var reader = DataReader.FromBuffer(args.CharacteristicValue);
-        var data = new byte[args.CharacteristicValue.Length];
+        var reader = DataReader.FromBuffer(buffer);
+        var data = new byte[buffer.Length];
         reader.ReadBytes(data);
+        return data;
+    }
+
+    private void OnInputNotify(GattCharacteristic sender, GattValueChangedEventArgs args)
+    {
+        var data = ReadBuffer(args.CharacteristicValue);
         if (data.Length == 0)
         {
             return;
         }
 
-        // A command reply arriving on a non-response characteristic.
-        if (_pendingCommands.TryRemove(data[0], out var tcs))
-        {
-            Log($"Reply for cmd {data[0]:X2} arrived on handle 0x{sender.AttributeHandle:X4}.");
-            tcs.TrySetResult(data);
-            return;
-        }
-
-        // Only the designated input characteristic carries gamepad reports.
-        // Other notify channels (…fdE aux stream, status chars) would decode as
-        // garbage input — log the first packet per handle, then drop them.
-        if (!ReferenceEquals(sender, _inputChar))
-        {
-            if (_seenNotifyHandles.Add(sender.AttributeHandle))
-            {
-                Log($"Notify on aux handle 0x{sender.AttributeHandle:X4}: {Convert.ToHexString(data[..Math.Min(8, data.Length)])} ({data.Length}B) — dropped.");
-            }
-            return;
-        }
-
-        // 0xA1 = optional HID-over-GATT prefix; 0x21 = subcommand reply.
-        if (data[0] == 0x21)
+        // GameCube NSO may emit short status/ack packets on extra notify chars.
+        if (_productId == Ns2Protocol.PidGameCubeNso && data.Length < 30)
         {
             return;
         }
@@ -306,10 +341,7 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
 
     private void OnCommandResponse(GattCharacteristic sender, GattValueChangedEventArgs args)
     {
-        var reader = DataReader.FromBuffer(args.CharacteristicValue);
-        var data = new byte[args.CharacteristicValue.Length];
-        reader.ReadBytes(data);
-
+        var data = ReadBuffer(args.CharacteristicValue);
         if (data.Length == 0)
         {
             return;
@@ -318,9 +350,15 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         var previewLen = Math.Min(8, data.Length);
         Log($"Response char: {Convert.ToHexString(data.AsSpan(0, previewLen))} ({data.Length}B)");
 
-        if (_pendingCommands.TryRemove(data[0], out var tcs))
+        var pending = Volatile.Read(ref _pendingCommand);
+        if (pending != null &&
+            data.Length >= 8 &&
+            data[0] == pending.Command &&
+            data[1] == 0x01 &&
+            data[3] == pending.Sub)
         {
-            tcs.TrySetResult(data);
+            Interlocked.CompareExchange(ref _pendingCommand, null, pending);
+            pending.Tcs.TrySetResult(data);
         }
         else
         {
@@ -336,6 +374,16 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         }
     }
 
+    private static GattWriteOption GetCommandWriteOption(GattCharacteristic characteristic)
+    {
+        // Bleak's write_gatt_char prefers WriteWithResponse when the
+        // characteristic supports it — match that (some controllers drop
+        // WriteWithoutResponse frames mid-handshake).
+        return characteristic.CharacteristicProperties.HasFlag(GattCharacteristicProperties.Write)
+            ? GattWriteOption.WriteWithResponse
+            : GattWriteOption.WriteWithoutResponse;
+    }
+
     public async Task<byte[]> SendCommandAsync(byte command, byte subcommand, ReadOnlyMemory<byte> data, CancellationToken ct)
     {
         if (_commandChar == null)
@@ -343,25 +391,19 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
             throw new InvalidOperationException("Transport not connected.");
         }
 
+        await _commandLock.WaitAsync(ct);
+
         var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _pendingCommands[command] = tcs;
+        var pending = new PendingCommand(command, subcommand, tcs);
+        Volatile.Write(ref _pendingCommand, pending);
 
         try
         {
-            await _commandLock.WaitAsync(ct);
-
             var frame = Ns2Protocol.BuildCommand(command, subcommand, data.Span, usb: false);
-            // Bleak's write_gatt_char prefers WriteWithResponse when the
-            // characteristic supports it — match that (some controllers drop
-            // WriteWithoutResponse frames mid-handshake).
-            var writeOption = _commandChar.CharacteristicProperties.HasFlag(GattCharacteristicProperties.Write)
-                ? GattWriteOption.WriteWithResponse
-                : GattWriteOption.WriteWithoutResponse;
             var status = await _commandChar.WriteValueWithResultAsync(
-                frame.AsBuffer(), writeOption);
+                frame.AsBuffer(), GetCommandWriteOption(_commandChar));
             if (status.Status != GattCommunicationStatus.Success)
             {
-                _pendingCommands.TryRemove(command, out _);
                 throw new InvalidOperationException($"Command {command:X2}:{subcommand:X2} write failed ({status.Status}).");
             }
 
@@ -379,8 +421,8 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         }
         finally
         {
+            Interlocked.CompareExchange(ref _pendingCommand, null, pending);
             _commandLock.Release();
-            _pendingCommands.TryRemove(command, out _);
         }
     }
 
@@ -400,7 +442,26 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
 
     public void SetRumble(bool on)
     {
+        var wasOn = _rumbleOn;
         _rumbleOn = on;
+        if (on)
+        {
+            Volatile.Write(ref _silenceCount, 0);
+        }
+        else if (!wasOn)
+        {
+            return;
+        }
+
+        if (_rumbleWake.CurrentCount == 0)
+        {
+            try
+            {
+                _rumbleWake.Release();
+            }
+            catch (SemaphoreFullException) { }
+            catch (ObjectDisposedException) { }
+        }
     }
 
     public async Task SetPlayerLedAsync(int padId, CancellationToken ct)
@@ -408,7 +469,7 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         await SendCommandAsync(0x09, 0x07, Ns2Protocol.BuildPlayerLedCommand(padId), ct);
     }
 
-    private async Task WriteCharAsync(GattCharacteristic characteristic, byte[] data, CancellationToken ct)
+    private async Task WriteCharNoResponseAsync(GattCharacteristic characteristic, byte[] data)
     {
         var status = await characteristic.WriteValueWithResultAsync(
             data.AsBuffer(), GattWriteOption.WriteWithoutResponse);
@@ -420,41 +481,38 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
 
     public async Task StopAsync()
     {
-        _keepAliveCts?.Cancel();
+        _rumbleCts?.Cancel();
 
-        // Give an in-flight keep-alive write time to finish before the
+        // Give an in-flight rumble write time to finish before the
         // service/device is closed underneath it.
-        if (_keepAliveTask != null)
+        if (_rumbleTask != null)
         {
-            await Task.WhenAny(_keepAliveTask, Task.Delay(300));
+            await Task.WhenAny(_rumbleTask, Task.Delay(300));
         }
 
         _device.ConnectionStatusChanged -= OnConnectionStatusChanged;
 
-        foreach (var c in new[] { _inputChar, _responseChar })
+        var connected = _device.ConnectionStatus == BluetoothConnectionStatus.Connected;
+        foreach (var (characteristic, handler) in _subscriptions)
         {
-            if (c == null)
-            {
-                continue;
-            }
-
             try
             {
-                c.ValueChanged -= OnAnyNotify;
-                c.ValueChanged -= OnCommandResponse;
-                await c.WriteClientCharacteristicConfigurationDescriptorAsync(
-                    GattClientCharacteristicConfigurationDescriptorValue.None);
+                characteristic.ValueChanged -= handler;
+                if (connected)
+                {
+                    await characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(
+                        GattClientCharacteristicConfigurationDescriptorValue.None);
+                }
             }
             catch (Exception e)
             {
                 Log($"Unsubscribe failed: {e.Message}");
             }
         }
+        _subscriptions.Clear();
 
         _service?.Dispose();
         _service = null;
-
-        await Task.CompletedTask;
     }
 
     public void Dispose()
@@ -465,9 +523,10 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         }
         _disposed = true;
 
-        _keepAliveCts?.Cancel();
+        _rumbleCts?.Cancel();
         _service?.Dispose();
         _device.Dispose();
         _commandLock.Dispose();
+        _rumbleWake.Dispose();
     }
 }

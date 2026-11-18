@@ -150,15 +150,87 @@ internal static class Ns2Protocol
         return true;
     }
 
-    // Keep-alive / simple rumble frame sent ~every 15 ms on the rumble characteristic.
-    public static byte[] BuildRumbleFrame(int counter, bool rumbleOn)
-    {
-        var frame = new byte[8];
-        frame[0] = 0x50;
-        frame[1] = (byte)(0x50 | (counter & 0x0F));
-        frame[2] = rumbleOn ? (byte)0x01 : (byte)0x00;
+    private const ushort DefaultRumbleLfFreq = 0x0E1;
+    private const ushort DefaultRumbleHfFreq = 0x1E1;
+    private const ushort DefaultRumbleAmp = 0x190;
+    private const int UsbOutputReportSize = 1 + 0x2A;
 
-        return frame;
+    /// <summary>
+    /// Encodes a single 5-byte HD Rumble 2 frame (little-endian 40-bit bitfield):
+    /// LF freq (9b) | LF tone (1b=0) | LF amp (10b) | HF freq (9b) | HF tone (1b=0) | HF amp (10b).
+    /// </summary>
+    public static void EncodeVibrationFrame(ushort lfFreq, ushort lfAmp, ushort hfFreq, ushort hfAmp, Span<byte> dest)
+    {
+        ulong value = ((ulong)lfFreq & 0x1FFUL)
+            | (((ulong)lfAmp & 0x3FFUL) << 10)
+            | (((ulong)hfFreq & 0x1FFUL) << 20)
+            | (((ulong)hfAmp & 0x3FFUL) << 30);
+
+        for (var i = 0; i < 5; i++)
+        {
+            dest[i] = (byte)(value >> (8 * i));
+        }
+    }
+
+    private static void WriteMotorBlock(Span<byte> dest, int counter, bool rumbleOn)
+    {
+        dest[0] = (byte)(0x50 | (counter & 0x0F));
+        var amp = rumbleOn ? DefaultRumbleAmp : (ushort)0;
+        for (var slot = 0; slot < 3; slot++)
+        {
+            EncodeVibrationFrame(DefaultRumbleLfFreq, amp, DefaultRumbleHfFreq, amp, dest.Slice(1 + (slot * 5), 5));
+        }
+    }
+
+    /// <summary>
+    /// Builds a BLE rumble payload for the given Switch 2 product:
+    /// Pro 2 (33B: 0x00 + L(16) + R(16)), Joy-Con 2 (17B: 0x00 + 16B),
+    /// or GameCube NSO (12B 0A:02 vibration command).
+    /// </summary>
+    public static byte[] BuildBleRumblePayload(ushort productId, int counter, bool rumbleOn)
+    {
+        if (productId == PidGameCubeNso)
+        {
+            return BuildCommand(0x0A, 0x02, [rumbleOn ? (byte)0x01 : (byte)0x00, 0x00, 0x00, 0x00], usb: false);
+        }
+
+        if (productId == PidPro2)
+        {
+            var payload = new byte[33];
+            WriteMotorBlock(payload.AsSpan(1, 16), counter, rumbleOn);
+            WriteMotorBlock(payload.AsSpan(17, 16), counter, rumbleOn);
+            return payload;
+        }
+
+        var jcPayload = new byte[17];
+        WriteMotorBlock(jcPayload.AsSpan(1, 16), counter, rumbleOn);
+        return jcPayload;
+    }
+
+    /// <summary>
+    /// Builds Pro Controller 2 USB HID output report 0x02 (43 bytes = 1 + 0x2A).
+    /// </summary>
+    public static byte[] BuildUsbPro2RumbleReport(int counter, bool rumbleOn)
+    {
+        var report = new byte[UsbOutputReportSize];
+        report[0] = 0x02;
+        WriteMotorBlock(report.AsSpan(1, 16), counter, rumbleOn);
+        WriteMotorBlock(report.AsSpan(17, 16), counter, rumbleOn);
+        return report;
+    }
+
+    /// <summary>
+    /// Builds NSO GameCube USB HID output report 0x03 (43 bytes = 1 + 0x2A).
+    /// </summary>
+    public static byte[] BuildUsbGameCubeRumbleReport(int counter, bool rumbleOn)
+    {
+        var report = new byte[UsbOutputReportSize];
+        report[0] = 0x03;
+        report[1] = (byte)((rumbleOn ? 0x60 : 0x50) | (counter & 0x0F));
+        report[2] = 0x00;
+        report[3] = rumbleOn ? (byte)0x01 : (byte)0x00;
+        report[4] = 0x00;
+        return report;
     }
 
     // Raw write to the command characteristic to select input format 3
@@ -196,22 +268,21 @@ internal static class Ns2Protocol
             // feature mask 0x94 = motion + mouse + magnetometer; 0xFF causes phantom ZL/ZR
             (0x0C, 0x02, [0x94, 0x00, 0x00, 0x00]),
             (0x11, 0x03, []),
-            (0x0A, 0x08, [0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x35, 0x00, 0x46, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            (0x0A, 0x08, [0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x35, 0x00, 0x46, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
             (0x0C, 0x04, [0x94, 0x00, 0x00, 0x00]),
             (0x03, 0x0A, [0x09, 0x00, 0x00, 0x00]),
             (0x10, 0x01, []),
             (0x01, 0x0C, []),
         };
 
+        // Pro Controller 2 answers 01:01 with status=4 on real hardware, so it is
+        // the only step skipped for it (Switch2Connect does the same).
         if (productId != PidPro2)
         {
             steps.Add((0x01, 0x01, [0x00, 0x00, 0x00, 0x00]));
         }
-        // Pro Controller 2 answers 01:01 with status=4 on real hardware, so it is
-        // the only step skipped for it (Switch2Connect does the same). The
-        // 0x11:03/0x0A:08 pair IS sent — 0A:08 enables haptic/report streaming;
-        // skipping it leaves the pad asleep after attach. Its reply can arrive
-        // on an aux notify handle, which the transport now routes.
+
+        steps.Add((0x09, 0x07, [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]));
 
         return steps;
     }
@@ -368,7 +439,7 @@ internal static class Ns2Protocol
                 return false; // subcommand / SPI reply
             }
 
-            if (report[0] is 0x30 or 0x31 or 0x05 or 0x01 or 0xA1)
+            if (report[0] is 0x30 or 0x31 or 0x05 or 0x09 or 0x0A or 0x01 or 0xA1)
             {
                 report = report[1..];
             }

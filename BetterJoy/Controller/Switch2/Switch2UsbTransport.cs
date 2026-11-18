@@ -26,6 +26,7 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
     private readonly ushort _productId;
     private readonly SemaphoreSlim _commandLock = new(1, 1);
     private readonly ConcurrentDictionary<byte, TaskCompletionSource<byte[]>> _pendingCommands = new();
+    private readonly object _hidWriteLock = new();
 
     // HID output-report command fallback (Switch2Connect send_startup_reports_hid):
     // when interface MI_01 isn't bound to WinUSB, commands go as output reports
@@ -173,12 +174,11 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
         }
     }
 
-    private async Task WriteCommandFrameAsync(byte[] frame, CancellationToken ct)
+    private Task WriteCommandFrameAsync(byte[] frame, CancellationToken ct)
     {
         if (!_useHidCommands)
         {
-            await WriteBulkAsync(frame, ct);
-            return;
+            return WriteBulkAsync(frame, ct);
         }
 
         // [report id] + command frame zero-padded to the output-report body size
@@ -187,9 +187,23 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
             ? OutputReportIdGameCube
             : OutputReportIdPro2;
         frame.CopyTo(report.AsSpan(1));
-        if (_device.Write(report, report.Length) <= 0)
+        WriteHidReport(report);
+        return Task.CompletedTask;
+    }
+
+    private void WriteHidReport(byte[] report)
+    {
+        lock (_hidWriteLock)
         {
-            throw new InvalidOperationException("HID output-report write failed.");
+            if (_disposed || !_device.IsValid)
+            {
+                return;
+            }
+
+            if (_device.Write(report, report.Length) <= 0)
+            {
+                throw new InvalidOperationException("HID output-report write failed.");
+            }
         }
     }
 
@@ -256,8 +270,8 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
                 continue;
             }
 
-            // Strip the USB report ID byte (0x05 = FD2 input, 0x01 = GC input).
-            var payload = report.Length > Ns2Protocol.StandardReportLen && report[0] is 0x05 or 0x01 or 0x30 or 0x31 or 0xA1
+            // Strip the USB report ID byte (0x05 = common, 0x09 = Pro 2, 0x0A = GC, 0x01 = legacy).
+            var payload = report.Length > Ns2Protocol.StandardReportLen && report[0] is 0x05 or 0x09 or 0x0A or 0x01 or 0x30 or 0x31 or 0xA1
                 ? report[1..]
                 : report;
 
@@ -415,16 +429,21 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
         try
         {
             var ct = _cts?.Token ?? CancellationToken.None;
+            var counter = Interlocked.Increment(ref _rumbleCounter);
             if (_productId == Ns2Protocol.PidGameCubeNso)
             {
-                // GC NSO takes its rumble flag on the vendor command channel.
-                await SendCommandAsync(0x0A, 0x02, new byte[] { on ? (byte)0x01 : (byte)0x00, 0x00, 0x00, 0x00 }, ct);
+                if (!_useHidCommands && _bulkOut != null)
+                {
+                    await SendCommandAsync(0x0A, 0x02, new byte[] { on ? (byte)0x01 : (byte)0x00, 0x00, 0x00, 0x00 }, ct);
+                }
+                else
+                {
+                    WriteHidReport(Ns2Protocol.BuildUsbGameCubeRumbleReport(counter, on));
+                }
             }
             else
             {
-                // Joy-Con 2 / Pro 2: same 0x50 keep-alive + rumble frame used
-                // on the BLE vibration characteristic, written on bulk OUT.
-                await WriteBulkAsync(Ns2Protocol.BuildRumbleFrame(_rumbleCounter++, on), ct);
+                WriteHidReport(Ns2Protocol.BuildUsbPro2RumbleReport(counter, on));
             }
         }
         catch (Exception e)
