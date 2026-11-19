@@ -12,6 +12,8 @@ public class ControllerConfig : Config
     public bool ShowAsXInput = true;
     public bool ShowAsDs4 = false;
     public bool EnablePro2Audio = true;
+    public bool EnablePro2UsbMic = true;
+    public bool AutoSwitchPro2UsbMic = true;
     public float StickLeftDeadzone = 0.15f;
     public float StickRightDeadzone = 0.15f;
     public float StickLeftRange = 0.90f;
@@ -54,6 +56,8 @@ public class ControllerConfig : Config
         ShowAsXInput = config.ShowAsXInput;
         ShowAsDs4 = config.ShowAsDs4;
         EnablePro2Audio = config.EnablePro2Audio;
+        EnablePro2UsbMic = config.EnablePro2UsbMic;
+        AutoSwitchPro2UsbMic = config.AutoSwitchPro2UsbMic;
         StickLeftDeadzone = config.StickLeftDeadzone;
         StickRightDeadzone = config.StickRightDeadzone;
         StickLeftRange = config.StickLeftRange;
@@ -95,6 +99,8 @@ public class ControllerConfig : Config
         TryUpdateSetting("ShowAsXInput", ref ShowAsXInput);
         TryUpdateSetting("ShowAsDS4", ref ShowAsDs4);
         TryUpdateSetting("EnablePro2Audio", ref EnablePro2Audio);
+        TryUpdateSetting("EnablePro2UsbMic", ref EnablePro2UsbMic);
+        TryUpdateSetting("AutoSwitchPro2UsbMic", ref AutoSwitchPro2UsbMic);
         TryUpdateSetting("StickLeftDeadzone", ref StickLeftDeadzone);
         TryUpdateSetting("StickRightDeadzone", ref StickRightDeadzone);
         TryUpdateSetting("StickLeftRange", ref StickLeftRange);

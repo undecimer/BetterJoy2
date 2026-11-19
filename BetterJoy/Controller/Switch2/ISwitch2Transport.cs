@@ -66,6 +66,9 @@ internal interface ISwitch2Transport : IDisposable
     /// <summary>Writes a 123-byte Opus chunk packet to the Pro 2 audio output characteristic.</summary>
     Task<bool> WriteBleAudioOutputAsync(byte[] payload, CancellationToken ct);
 
+    /// <summary>Re-runs the Pro Controller 2 USB audio DSP initialization sequence (no-op on BLE or non-Pro2).</summary>
+    Task ReinitializeUsbAudioAsync(CancellationToken ct);
+
     /// <summary>Stops the transport and releases the link.</summary>
     Task StopAsync();
 }

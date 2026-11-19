@@ -518,6 +518,8 @@ internal sealed class Switch2BleTransport : ISwitch2Transport
         return await WriteAudioNoResponseAsync(_audioOutputChar, payload, ct).ConfigureAwait(false);
     }
 
+    public Task ReinitializeUsbAudioAsync(CancellationToken ct) => Task.CompletedTask;
+
     private async Task<bool> WriteAudioNoResponseAsync(GattCharacteristic? characteristic, byte[] payload, CancellationToken ct)
     {
         if (characteristic == null || _disposed || ct.IsCancellationRequested)

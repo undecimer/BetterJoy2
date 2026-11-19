@@ -2,8 +2,8 @@
   <img src="title.png">
 </p>
 
-# BetterJoy2 v9.0.0 Beta 2
-#### What's new in BetterJoy2 (v9.0.0 Beta 2)
+# BetterJoy2 v9.0.0 Beta 3
+#### What's new in BetterJoy2 (v9.0.0 Beta 3)
 - **Native Nintendo Switch 2 controller support** (Bluetooth LE & USB-C) alongside full Switch 1 controller support (`Joycon.cs` untouched):
   - **Nintendo Switch 2 Pro Controller (`0x2069`)** over BLE and USB-C
   - **Joy-Con 2 (Left `0x2067` & Right `0x2066`)** — single horizontal mode, joined dual-controller mode, and optical mouse sensor mode (place a Joy-Con 2 sensor-down on a surface; `ZL`/`ZR` = Left Click, `L`/`R` = Right Click, `L3`/`R3` = Middle Click)
@@ -11,13 +11,15 @@
   - **Switch 2 buttons & haptics:** `C` (Chat) mapped to Back/Touchpad, `GL`/`GR` grip buttons mapped to `L3`/`R3` on virtual Xbox 360 / DualShock 4 outputs, HD Rumble 2 voice-coil vibration (BLE & USB-C), and GameCube ERM rumble
   - **Automatic BLE discovery & host bonding:** connects to Switch 2 controllers in sync mode or reconnect mode directly without requiring manual Windows Bluetooth Settings pairing
   - **Calibration & 6-axis IMU motion:** reads factory and user SPI stick calibration, feeds Cemuhook UDP (`DSUController` on `127.0.0.1:26760`), and emits DualShock 4 `DS4_REPORT_EX` motion reports when `ShowAsDS4` is enabled (enabling SDL motion)
-  - **3.5 mm headphone jack audio output (Pro Controller 2, firmware 2.x+):** supports audio output over **USB-C** (UAC1 48 kHz stereo endpoint with automatic Windows default audio bridging) and **Bluetooth LE** (48 kHz stereo 96 kbps CBR CELT-only Opus loopback stream enabled automatically when headphones are plugged in; toggleable via `EnablePro2Audio`)
+  - **3.5 mm headset jack audio (Pro Controller 2, firmware 2.x+):**
+    - **Headphone audio output (`EnablePro2Audio`):** supported over both **USB-C** (UAC1 48 kHz stereo endpoint with automatic Windows default audio bridging) and **Bluetooth LE** (48 kHz stereo 96 kbps CBR CELT-only Opus loopback stream enabled automatically when headphones are plugged in)
+    - **Headset microphone input (`EnablePro2UsbMic`, `AutoSwitchPro2UsbMic`):** supported over **USB-C** with a 4-pole TRRS headset (automatically unmutes the native UAC1 `Switch 2 Pro Controller` microphone while plugged in, mutes it while empty, and temporarily switches Windows default recording/communications input cleanly)
 - **Upstream base ([d3xMachina/BetterJoy](https://github.com/d3xMachina/BetterJoy) v8.5 LTS):**
   - Switch 1 Pro Controller, Joy-Con (L/R), SNES, N64, NES/Famicom, and 3rd-party controllers
   - Controller calibration, deadzone, range, anti-deadzone, and stick shape (`circle`, `square`, `n64`) settings
   - .NET 10, updated `hidapi`, and HidHide driver support
 
-> **Beta note:** Switch 2 Pro Controller over both USB-C and BLE has been verified on Windows hardware. Joy-Con 2 (single/joined/mouse) and NSO GameCube Controller support are included in this beta based on protocol specifications and welcome hardware feedback.
+> **Beta note:** Switch 2 Pro Controller over both USB-C (including 3.5 mm headphone output and TRRS microphone input) and BLE (including 3.5 mm headphone output) has been verified on Windows hardware. Joy-Con 2 (single/joined/mouse) and NSO GameCube Controller support are included in this beta based on protocol specifications and welcome hardware feedback.
 
 #### Description
 
@@ -69,9 +71,9 @@ Check out the [wiki](https://github.com/Davidobot/BetterJoy/wiki)! There, you'll
 
 ### USB-C Mode
 * Plug the Switch 2 Pro Controller or NSO GameCube Controller into your PC with a USB-C cable. BetterJoy detects the controller via USB HID hotplug and filters out duplicate/synthetic Bluetooth HID nodes automatically.
-* **3.5 mm Headphone Jack Audio (`EnablePro2Audio = true`):**
-  * Over **USB-C**, Windows exposes the controller's UAC1 `Switch 2 Pro Controller` stereo headphone (and microphone) interfaces via `usbaudio.sys`. When enabled, BetterJoy automatically bridges your default Windows audio output to the controller (or yields cleanly if `Switch 2 Pro Controller` is already selected as the Windows default output device).
-  * Over **BLE** (requires controller firmware `2.x+`), plugging headphones into the 3.5 mm jack starts an Opus CELT loopback stream from your default Windows audio playback device directly to the controller.
+* **3.5 mm Headset Jack Audio (Pro Controller 2, firmware `2.x+`):**
+  * **Output (`EnablePro2Audio = true`):** Over **USB-C**, Windows exposes the controller's UAC1 `Switch 2 Pro Controller` stereo headphone endpoint via `usbaudio.sys`; BetterJoy unmutes it and automatically bridges your default Windows playback audio while a headset is plugged in (or yields cleanly if `Switch 2 Pro Controller` is already selected as the Windows default output device). Over **BLE**, plugging headphones into the 3.5 mm jack starts a low-latency Opus CELT loopback stream from your default Windows audio playback device directly to the controller.
+  * **Microphone Input over USB-C (`EnablePro2UsbMic = true`, `AutoSwitchPro2UsbMic = true`):** Requires a wired USB-C connection and a 4-pole (CTIA TRRS) headset. While a headset is plugged into the 3.5 mm jack, BetterJoy unmutes the native UAC1 `Switch 2 Pro Controller` microphone (`Microphone` / `Micrófono`) and can temporarily switch Windows' default recording and communications device to it, automatically muting the mic and restoring your previous default microphone when unplugged or disconnected. *(BLE microphone capture is not supported because the BLE mic packet codec is undocumented.)*
 
 ## Switch 1 Controllers
 ### Bluetooth Mode

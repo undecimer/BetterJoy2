@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using BetterJoy.Logging;
@@ -11,18 +12,24 @@ using NAudio.Wave;
 namespace BetterJoy.Controller.Switch2;
 
 /// <summary>
-/// Streams Windows desktop playback audio to a Switch 2 Pro Controller 3.5mm jack:
-/// - Over USB-C: ensures the UAC1 "Switch 2 Pro Controller" render endpoint is unmuted
-///   and bridges the current Windows default audio output into it whenever another
-///   playback device is set as default.
+/// Streams Windows desktop playback audio to a Switch 2 Pro Controller 3.5mm jack
+/// and manages the USB-C UAC1 microphone input endpoint:
+/// - Over USB-C: unmutes and bridges Windows default audio output to the controller
+///   headphones while a 3.5mm plug is inserted (EnablePro2Audio), unmutes/gains the
+///   UAC1 microphone while plugged in (mutes when empty, EnablePro2UsbMic), and
+///   optionally switches/restores the default recording endpoint (AutoSwitchPro2UsbMic).
 /// - Over BLE: captures Windows loopback audio, encodes 48 kHz stereo 20 ms frames as
 ///   96 kbps CBR CELT-only Opus (240 B) via Concentus, and streams split 120 B chunks
 ///   to GATT audio handle 0x002C after enabling audio on 0x0032.
 /// </summary>
 internal sealed class Switch2AudioStreamer : IDisposable
 {
+    internal readonly record struct Pro2AudioOptions(bool OutputEnabled, bool UsbMicEnabled, bool AutoSwitchUsbMic);
+
     private static readonly Guid MediaSubtypeIeeeFloat = new("00000003-0000-0010-8000-00aa00389b71");
     private static readonly Guid MediaSubtypePcm = new("00000001-0000-0010-8000-00aa00389b71");
+
+    private static readonly Role[] CaptureRoles = [Role.Console, Role.Multimedia, Role.Communications];
 
     private const int PcmFrameShorts = Ns2Protocol.AudioFrameSamplesPerChannel * Ns2Protocol.AudioChannels; // 1920 shorts = 20 ms @ 48 kHz stereo
     private const int RingCapacityShorts = PcmFrameShorts * 6; // 120 ms capacity
@@ -31,8 +38,10 @@ internal sealed class Switch2AudioStreamer : IDisposable
     private const int MaxConsecutiveBleFailures = 16;
 
     private readonly ISwitch2Transport _transport;
+    private readonly Func<Pro2AudioOptions> _getOptions;
     private readonly Action<string, LogLevel> _log;
     private readonly object _lifecycleLock = new();
+    private readonly AutoResetEvent _stateSignal = new(false);
 
     private CancellationTokenSource? _cts;
     private Thread? _workerThread;
@@ -49,10 +58,25 @@ internal sealed class Switch2AudioStreamer : IDisposable
         }
     }
 
-    public Switch2AudioStreamer(ISwitch2Transport transport, Action<string, LogLevel> log)
+    public Switch2AudioStreamer(ISwitch2Transport transport, Func<Pro2AudioOptions> getOptions, Action<string, LogLevel> log)
     {
         _transport = transport;
+        _getOptions = getOptions;
         _log = log;
+    }
+
+    public void NotifyStateChanged()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        try
+        {
+            _stateSignal.Set();
+        }
+        catch (ObjectDisposedException) { }
     }
 
     public void Start()
@@ -368,18 +392,38 @@ internal sealed class Switch2AudioStreamer : IDisposable
     }
 
     // ------------------------------------------------------------------
-    // USB Audio Class 1.0 bridge (48 kHz 16-bit Stereo via WASAPI)
+    // USB Audio Class 1.0 bridge & microphone manager (48 kHz 16-bit PCM)
     // ------------------------------------------------------------------
+
+    private sealed class UsbRenderState
+    {
+        public WasapiCapture? Capture;
+        public WasapiOut? Output;
+        public string? BridgedSourceId;
+        public string? BridgedTargetId;
+        public volatile bool CaptureStopped;
+        public bool ReportedNativeDefault;
+        public bool WaitingLogged;
+    }
+
+    private sealed class UsbMicState
+    {
+        public bool WaitingLogged;
+        public bool DisabledWarningLogged;
+        public bool ReadyLoggedForPlug;
+        public bool MutedByUs;
+        public bool AutoSwitchAppliedForPlug;
+        public bool LastAutoSwitchOption;
+        public string? LastPro2MicId;
+        public readonly Dictionary<Role, (string Id, string FriendlyName)> SavedDefaultMics = new();
+    }
 
     private void RunUsbAudioLoop(CancellationToken ct)
     {
-        WasapiCapture? capture = null;
-        WasapiOut? output = null;
-        string? bridgedSourceId = null;
-        string? bridgedTargetId = null;
-        var captureStopped = false;
-        var reportedNativeDefault = false;
-        var waitingLogged = false;
+        var renderState = new UsbRenderState();
+        var micState = new UsbMicState();
+        var waitHandles = new WaitHandle[] { ct.WaitHandle, _stateSignal };
+        var lastHeadsetConnected = false;
 
         try
         {
@@ -387,86 +431,44 @@ internal sealed class Switch2AudioStreamer : IDisposable
             {
                 try
                 {
+                    var opts = _getOptions();
+                    var headsetConnected = _transport.IsHeadsetConnected || !_transport.HasHeadsetJackDetect;
+
+                    if (headsetConnected && !lastHeadsetConnected)
+                    {
+                        try
+                        {
+                            _transport.ReinitializeUsbAudioAsync(ct).GetAwaiter().GetResult();
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            throw;
+                        }
+                        catch (Exception e)
+                        {
+                            _log($"USB audio re-init failed: {e.Message}", LogLevel.Debug);
+                        }
+                    }
+                    lastHeadsetConnected = headsetConnected;
+
                     using var enumerator = new MMDeviceEnumerator();
-                    using var pro2Endpoint = FindPro2RenderEndpoint(enumerator);
-
-                    if (pro2Endpoint == null)
-                    {
-                        StopUsbBridge(ref capture, ref output, ref bridgedSourceId, ref bridgedTargetId);
-                        captureStopped = false;
-                        reportedNativeDefault = false;
-                        if (!waitingLogged)
-                        {
-                            _log("Waiting for Windows USB Audio endpoint (Switch 2 Pro Controller)...", LogLevel.Debug);
-                            LogAvailableRenderEndpoints(enumerator);
-                            waitingLogged = true;
-                        }
-                        if (ct.WaitHandle.WaitOne(1000))
-                        {
-                            break;
-                        }
-                        continue;
-                    }
-
-                    waitingLogged = false;
-                    EnsureEndpointUnmuted(pro2Endpoint);
-
-                    if (!enumerator.HasDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia))
-                    {
-                        StopUsbBridge(ref capture, ref output, ref bridgedSourceId, ref bridgedTargetId);
-                        captureStopped = false;
-                        if (ct.WaitHandle.WaitOne(1000))
-                        {
-                            break;
-                        }
-                        continue;
-                    }
-
-                    using var defaultEndpoint = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
-
-                    // Avoid loopback onto the controller itself when Windows default output
-                    // is already set to Switch 2 Pro Controller.
-                    if (string.Equals(defaultEndpoint.ID, pro2Endpoint.ID, StringComparison.OrdinalIgnoreCase))
-                    {
-                        StopUsbBridge(ref capture, ref output, ref bridgedSourceId, ref bridgedTargetId);
-                        captureStopped = false;
-                        if (!reportedNativeDefault)
-                        {
-                            _log($"USB Audio active directly via Windows default device ({pro2Endpoint.FriendlyName}).", LogLevel.Info);
-                            reportedNativeDefault = true;
-                        }
-                    }
-                    else
-                    {
-                        reportedNativeDefault = false;
-                        var needsRestart = capture == null ||
-                            output == null ||
-                            captureStopped ||
-                            !string.Equals(bridgedSourceId, defaultEndpoint.ID, StringComparison.OrdinalIgnoreCase) ||
-                            !string.Equals(bridgedTargetId, pro2Endpoint.ID, StringComparison.OrdinalIgnoreCase);
-
-                        if (needsRestart)
-                        {
-                            StopUsbBridge(ref capture, ref output, ref bridgedSourceId, ref bridgedTargetId);
-                            captureStopped = false;
-                            StartUsbBridge(defaultEndpoint, pro2Endpoint, out capture, out output, () => captureStopped = true);
-                            bridgedSourceId = defaultEndpoint.ID;
-                            bridgedTargetId = pro2Endpoint.ID;
-                            _log($"USB Audio bridging '{defaultEndpoint.FriendlyName}' -> '{pro2Endpoint.FriendlyName}'.", LogLevel.Info);
-                        }
-                    }
+                    UpdateUsbRenderOutput(enumerator, renderState, opts.OutputEnabled, headsetConnected);
+                    UpdateUsbCaptureMic(enumerator, micState, opts.UsbMicEnabled, opts.AutoSwitchUsbMic, headsetConnected);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
                 }
                 catch (Exception e)
                 {
                     if (!ct.IsCancellationRequested)
                     {
-                        _log($"USB audio bridge error: {e.Message}", LogLevel.Debug);
+                        _log($"USB audio manager error: {e.Message}", LogLevel.Debug);
                     }
-                    StopUsbBridge(ref capture, ref output, ref bridgedSourceId, ref bridgedTargetId);
-                    captureStopped = false;
+                    StopUsbBridge(renderState);
                 }
 
-                if (ct.WaitHandle.WaitOne(1000))
+                if (WaitHandle.WaitAny(waitHandles, 1000) == 0)
                 {
                     break;
                 }
@@ -474,32 +476,400 @@ internal sealed class Switch2AudioStreamer : IDisposable
         }
         finally
         {
-            StopUsbBridge(ref capture, ref output, ref bridgedSourceId, ref bridgedTargetId);
+            StopUsbBridge(renderState);
+            try
+            {
+                using var enumerator = new MMDeviceEnumerator();
+                RestoreSavedDefaultMic(enumerator, micState);
+                RestoreMicMuteIfOwned(enumerator, micState);
+            }
+            catch { }
             _log("USB audio streamer stopped.", LogLevel.Debug);
         }
     }
 
-    private void LogAvailableRenderEndpoints(MMDeviceEnumerator enumerator)
+    private void UpdateUsbRenderOutput(
+        MMDeviceEnumerator enumerator,
+        UsbRenderState state,
+        bool enabled,
+        bool headsetConnected)
+    {
+        if (!enabled || !headsetConnected)
+        {
+            StopUsbBridge(state);
+            state.ReportedNativeDefault = false;
+            state.WaitingLogged = false;
+            return;
+        }
+
+        using var pro2Endpoint = FindPro2Endpoint(enumerator, DataFlow.Render);
+        if (pro2Endpoint == null)
+        {
+            StopUsbBridge(state);
+            state.ReportedNativeDefault = false;
+            if (!state.WaitingLogged)
+            {
+                _log("Waiting for Windows USB Audio endpoint (Switch 2 Pro Controller)...", LogLevel.Debug);
+                LogAvailableEndpoints(enumerator, DataFlow.Render);
+                state.WaitingLogged = true;
+            }
+            return;
+        }
+
+        state.WaitingLogged = false;
+        EnsureRenderEndpointUnmuted(pro2Endpoint);
+
+        if (!enumerator.HasDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia))
+        {
+            StopUsbBridge(state);
+            return;
+        }
+
+        using var defaultEndpoint = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+
+        // Avoid loopback onto the controller itself when Windows default output
+        // is already set to Switch 2 Pro Controller.
+        if (string.Equals(defaultEndpoint.ID, pro2Endpoint.ID, StringComparison.OrdinalIgnoreCase))
+        {
+            StopUsbBridge(state);
+            if (!state.ReportedNativeDefault)
+            {
+                _log($"USB Audio active directly via Windows default device ({pro2Endpoint.FriendlyName}).", LogLevel.Info);
+                state.ReportedNativeDefault = true;
+            }
+            return;
+        }
+
+        state.ReportedNativeDefault = false;
+        var needsRestart = state.Capture == null ||
+            state.Output == null ||
+            state.CaptureStopped ||
+            !string.Equals(state.BridgedSourceId, defaultEndpoint.ID, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(state.BridgedTargetId, pro2Endpoint.ID, StringComparison.OrdinalIgnoreCase);
+
+        if (!needsRestart)
+        {
+            return;
+        }
+
+        StopUsbBridge(state);
+        StartUsbBridge(defaultEndpoint, pro2Endpoint, out state.Capture, out state.Output, () => state.CaptureStopped = true);
+        state.BridgedSourceId = defaultEndpoint.ID;
+        state.BridgedTargetId = pro2Endpoint.ID;
+        _log($"USB Audio bridging '{defaultEndpoint.FriendlyName}' -> '{pro2Endpoint.FriendlyName}'.", LogLevel.Info);
+    }
+
+    private void UpdateUsbCaptureMic(
+        MMDeviceEnumerator enumerator,
+        UsbMicState state,
+        bool enabled,
+        bool autoSwitch,
+        bool headsetConnected)
+    {
+        if (!enabled)
+        {
+            RestoreSavedDefaultMic(enumerator, state);
+            RestoreMicMuteIfOwned(enumerator, state);
+            state.ReadyLoggedForPlug = false;
+            state.AutoSwitchAppliedForPlug = false;
+            state.WaitingLogged = false;
+            state.DisabledWarningLogged = false;
+            state.LastAutoSwitchOption = false;
+            return;
+        }
+
+        using var pro2Mic = FindPro2Endpoint(enumerator, DataFlow.Capture);
+        if (pro2Mic == null)
+        {
+            HandleMissingCaptureEndpoint(enumerator, state);
+            return;
+        }
+
+        state.WaitingLogged = false;
+        state.DisabledWarningLogged = false;
+        state.LastPro2MicId = pro2Mic.ID;
+
+        if (!headsetConnected)
+        {
+            state.ReadyLoggedForPlug = false;
+            state.AutoSwitchAppliedForPlug = false;
+            state.LastAutoSwitchOption = autoSwitch;
+            RestoreSavedDefaultMic(enumerator, state);
+            MuteCaptureEndpointWhenEmpty(pro2Mic, state);
+            return;
+        }
+
+        EnsureCaptureEndpointReady(pro2Mic, state);
+
+        if (autoSwitch && (!state.AutoSwitchAppliedForPlug || !state.LastAutoSwitchOption))
+        {
+            SwitchDefaultMicToPro2(enumerator, pro2Mic, state);
+        }
+        else if (!autoSwitch && state.LastAutoSwitchOption)
+        {
+            RestoreSavedDefaultMic(enumerator, state);
+            state.AutoSwitchAppliedForPlug = false;
+        }
+        state.LastAutoSwitchOption = autoSwitch;
+
+        if (!state.ReadyLoggedForPlug)
+        {
+            LogMicReady(enumerator, pro2Mic);
+            state.ReadyLoggedForPlug = true;
+        }
+    }
+
+    private void HandleMissingCaptureEndpoint(MMDeviceEnumerator enumerator, UsbMicState state)
+    {
+        state.ReadyLoggedForPlug = false;
+        using var disabledMic = FindPro2Endpoint(enumerator, DataFlow.Capture, DeviceState.Disabled);
+        if (disabledMic != null)
+        {
+            if (!state.DisabledWarningLogged)
+            {
+                _log($"USB Microphone endpoint '{disabledMic.FriendlyName}' is disabled in Windows Sound settings (mmsys.cpl -> Recording). Re-enable it to use the controller microphone.", LogLevel.Warning);
+                state.DisabledWarningLogged = true;
+            }
+            return;
+        }
+
+        if (!state.WaitingLogged)
+        {
+            _log("Waiting for Windows USB Microphone endpoint (Switch 2 Pro Controller)...", LogLevel.Debug);
+            LogAvailableEndpoints(enumerator, DataFlow.Capture);
+            state.WaitingLogged = true;
+        }
+    }
+
+    private void EnsureCaptureEndpointReady(MMDevice endpoint, UsbMicState state)
     {
         try
         {
-            foreach (var device in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+            var vol = endpoint.AudioEndpointVolume;
+            if (vol.Mute)
             {
-                _log($"Render endpoint detected: '{device.FriendlyName}' (device='{device.DeviceFriendlyName}').", LogLevel.Debug);
+                vol.Mute = false;
+            }
+            if (vol.MasterVolumeLevelScalar < 0.15f)
+            {
+                vol.MasterVolumeLevelScalar = 0.85f;
+            }
+            state.MutedByUs = false;
+        }
+        catch (Exception e)
+        {
+            _log($"Could not prepare USB microphone endpoint: {e.Message}", LogLevel.Debug);
+        }
+    }
+
+    private void MuteCaptureEndpointWhenEmpty(MMDevice endpoint, UsbMicState state)
+    {
+        try
+        {
+            var vol = endpoint.AudioEndpointVolume;
+            if (!vol.Mute)
+            {
+                vol.Mute = true;
+                state.MutedByUs = true;
+                _log($"USB Microphone muted while 3.5mm jack is empty ('{endpoint.FriendlyName}').", LogLevel.Debug);
+            }
+        }
+        catch (Exception e)
+        {
+            _log($"Could not mute idle USB microphone endpoint: {e.Message}", LogLevel.Debug);
+        }
+    }
+
+    private void SwitchDefaultMicToPro2(MMDeviceEnumerator enumerator, MMDevice pro2Mic, UsbMicState state)
+    {
+        var switched = false;
+        string? previousName = null;
+
+        foreach (var role in CaptureRoles)
+        {
+            try
+            {
+                string? currentId = null;
+                string? currentName = null;
+                if (enumerator.HasDefaultAudioEndpoint(DataFlow.Capture, role))
+                {
+                    using var current = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, role);
+                    currentId = current.ID;
+                    currentName = current.FriendlyName;
+                }
+
+                if (string.Equals(currentId, pro2Mic.ID, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (currentId != null && currentName != null && !state.SavedDefaultMics.ContainsKey(role))
+                {
+                    state.SavedDefaultMics[role] = (currentId, currentName);
+                    previousName ??= currentName;
+                }
+
+                if (WindowsAudioPolicyConfig.TrySetDefaultEndpoint(pro2Mic.ID, role, out _))
+                {
+                    switched = true;
+                }
+            }
+            catch (Exception e)
+            {
+                _log($"Could not switch default microphone role {role}: {e.Message}", LogLevel.Debug);
+            }
+        }
+
+        state.AutoSwitchAppliedForPlug = true;
+        if (switched)
+        {
+            var prevInfo = previousName != null ? $" (was '{previousName}')" : "";
+            _log($"USB Microphone set as Windows default input: '{pro2Mic.FriendlyName}'{prevInfo}.", LogLevel.Info);
+        }
+    }
+
+    private void RestoreSavedDefaultMic(MMDeviceEnumerator enumerator, UsbMicState state)
+    {
+        if (state.SavedDefaultMics.Count == 0)
+        {
+            return;
+        }
+
+        string? restoredName = null;
+        foreach (var (role, saved) in state.SavedDefaultMics)
+        {
+            try
+            {
+                var shouldRestore = !enumerator.HasDefaultAudioEndpoint(DataFlow.Capture, role);
+                if (!shouldRestore)
+                {
+                    using var current = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, role);
+                    if (string.Equals(current.ID, saved.Id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    shouldRestore = IsPro2Endpoint(current, state.LastPro2MicId);
+                }
+
+                if (!shouldRestore)
+                {
+                    continue;
+                }
+
+                using var target = enumerator.GetDevice(saved.Id);
+                if (target.State != DeviceState.Active)
+                {
+                    continue;
+                }
+
+                if (WindowsAudioPolicyConfig.TrySetDefaultEndpoint(saved.Id, role, out _))
+                {
+                    restoredName ??= saved.FriendlyName;
+                }
+            }
+            catch { }
+        }
+
+        if (restoredName != null)
+        {
+            _log($"USB Microphone restored Windows default input -> '{restoredName}'.", LogLevel.Info);
+        }
+
+        state.SavedDefaultMics.Clear();
+    }
+
+    private void RestoreMicMuteIfOwned(MMDeviceEnumerator enumerator, UsbMicState state)
+    {
+        if (!state.MutedByUs)
+        {
+            return;
+        }
+
+        try
+        {
+            using var pro2Mic = FindPro2Endpoint(enumerator, DataFlow.Capture);
+            if (pro2Mic != null && pro2Mic.AudioEndpointVolume.Mute)
+            {
+                pro2Mic.AudioEndpointVolume.Mute = false;
+            }
+        }
+        catch { }
+        finally
+        {
+            state.MutedByUs = false;
+        }
+    }
+
+    private void LogMicReady(MMDeviceEnumerator enumerator, MMDevice pro2Mic)
+    {
+        var fmt = "unknown format";
+        try
+        {
+            var mix = pro2Mic.AudioClient.MixFormat;
+            fmt = $"{mix.SampleRate} Hz, {mix.BitsPerSample}-bit, {mix.Channels} ch";
+        }
+        catch { }
+
+        var volPct = 0;
+        try
+        {
+            volPct = (int)Math.Round(pro2Mic.AudioEndpointVolume.MasterVolumeLevelScalar * 100f);
+        }
+        catch { }
+
+        var isDefault = IsEndpointDefaultForRole(enumerator, pro2Mic.ID, Role.Console) ||
+            IsEndpointDefaultForRole(enumerator, pro2Mic.ID, Role.Communications);
+        _log($"USB Microphone ready: '{pro2Mic.FriendlyName}' ({fmt}, vol={volPct}%, default={isDefault}).", LogLevel.Info);
+    }
+
+    private static bool IsEndpointDefaultForRole(MMDeviceEnumerator enumerator, string deviceId, Role role)
+    {
+        try
+        {
+            if (!enumerator.HasDefaultAudioEndpoint(DataFlow.Capture, role))
+            {
+                return false;
+            }
+
+            using var current = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, role);
+            return string.Equals(current.ID, deviceId, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsPro2Endpoint(MMDevice device, string? knownId = null)
+    {
+        if (knownId != null && string.Equals(device.ID, knownId, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return device.FriendlyName.Contains("Switch 2 Pro Controller", StringComparison.OrdinalIgnoreCase) ||
+            device.DeviceFriendlyName.Contains("Switch 2 Pro Controller", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void LogAvailableEndpoints(MMDeviceEnumerator enumerator, DataFlow flow)
+    {
+        var label = flow == DataFlow.Render ? "Render" : "Capture";
+        try
+        {
+            foreach (var device in enumerator.EnumerateAudioEndPoints(flow, DeviceState.Active))
+            {
+                _log($"{label} endpoint detected: '{device.FriendlyName}' (device='{device.DeviceFriendlyName}').", LogLevel.Debug);
                 device.Dispose();
             }
         }
         catch { }
     }
 
-    private static MMDevice? FindPro2RenderEndpoint(MMDeviceEnumerator enumerator)
+    private static MMDevice? FindPro2Endpoint(MMDeviceEnumerator enumerator, DataFlow flow, DeviceState state = DeviceState.Active)
     {
-        foreach (var device in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+        foreach (var device in enumerator.EnumerateAudioEndPoints(flow, state))
         {
-            var friendly = device.FriendlyName;
-            var devFriendly = device.DeviceFriendlyName;
-            if (friendly.Contains("Switch 2 Pro Controller", StringComparison.OrdinalIgnoreCase) ||
-                devFriendly.Contains("Switch 2 Pro Controller", StringComparison.OrdinalIgnoreCase))
+            if (IsPro2Endpoint(device))
             {
                 return device;
             }
@@ -509,7 +879,7 @@ internal sealed class Switch2AudioStreamer : IDisposable
         return null;
     }
 
-    private void EnsureEndpointUnmuted(MMDevice endpoint)
+    private void EnsureRenderEndpointUnmuted(MMDevice endpoint)
     {
         try
         {
@@ -578,29 +948,26 @@ internal sealed class Switch2AudioStreamer : IDisposable
         output = wasapiOut;
     }
 
-    private static void StopUsbBridge(
-        ref WasapiCapture? capture,
-        ref WasapiOut? output,
-        ref string? sourceId,
-        ref string? targetId)
+    private static void StopUsbBridge(UsbRenderState state)
     {
-        StopLoopbackCapture(ref capture);
-        if (output != null)
+        StopLoopbackCapture(ref state.Capture);
+        if (state.Output != null)
         {
             try
             {
-                output.Stop();
+                state.Output.Stop();
             }
             catch { }
             try
             {
-                output.Dispose();
+                state.Output.Dispose();
             }
             catch { }
-            output = null;
+            state.Output = null;
         }
-        sourceId = null;
-        targetId = null;
+        state.BridgedSourceId = null;
+        state.BridgedTargetId = null;
+        state.CaptureStopped = false;
     }
 
     private static void StopLoopbackCapture(ref WasapiCapture? capture)
@@ -680,6 +1047,7 @@ internal sealed class Switch2AudioStreamer : IDisposable
         }
 
         Stop();
+        _stateSignal.Dispose();
     }
 
     // ------------------------------------------------------------------

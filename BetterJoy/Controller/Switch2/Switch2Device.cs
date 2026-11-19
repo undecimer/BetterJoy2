@@ -193,7 +193,13 @@ public class Switch2Device : IControllerDevice
 
         if (Type == Joycon.ControllerType.Pro2)
         {
-            _audioStreamer = new Switch2AudioStreamer(_transport, (msg, level) => Log(msg, level));
+            _audioStreamer = new Switch2AudioStreamer(
+                _transport,
+                () => new Switch2AudioStreamer.Pro2AudioOptions(
+                    Config.EnablePro2Audio,
+                    Config.EnablePro2UsbMic,
+                    Config.AutoSwitchPro2UsbMic),
+                (msg, level) => Log(msg, level));
             _transport.HeadsetStateChanged += OnHeadsetStateChanged;
         }
     }
@@ -338,15 +344,23 @@ public class Switch2Device : IControllerDevice
             return;
         }
 
-        if (!Config.EnablePro2Audio)
+        if (_transport.IsUsb)
         {
-            _audioStreamer.Stop();
+            if (Config.EnablePro2Audio || Config.EnablePro2UsbMic)
+            {
+                _audioStreamer.Start();
+                _audioStreamer.NotifyStateChanged();
+            }
+            else
+            {
+                _audioStreamer.Stop();
+            }
             return;
         }
 
-        if (_transport.IsUsb)
+        if (!Config.EnablePro2Audio)
         {
-            _audioStreamer.Start();
+            _audioStreamer.Stop();
             return;
         }
 

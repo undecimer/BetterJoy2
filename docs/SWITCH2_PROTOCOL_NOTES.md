@@ -225,11 +225,12 @@ Implemented in `Switch2AudioStreamer.cs`, `Ns2Protocol.cs`, `Switch2BleTransport
 
 - **USB-C (UAC 1.0 composite interfaces IF2–IF4):**
   - After HID/vendor init, Pro Controller 2 audio setup commands `18:01`, `18:03 (0x07)`, and `17:02 (80 BB 00 00 02 F0 00)` configure 48 kHz stereo PCM audio routing.
-  - Windows `usbaudio.sys` binds `MI_02`..`MI_04` as a standard Stereo Headphones output (`48 kHz`, 16-bit PCM, `EP 0x03` isoch OUT) and Mono Microphone input (`48 kHz`, 16-bit PCM, `EP 0x83` isoch IN). BetterJoy mirrors default WASAPI loopback audio onto the `Switch 2 Pro Controller` endpoint unless it is already the Windows default playback device.
-- **Bluetooth LE (GATT Opus/CELT):**
+  - Windows `usbaudio.sys` binds `MI_02`..`MI_04` as native UAC 1.0 endpoints: Interface 3 (`EP 0x03` isoch OUT, 192 B, `48 kHz` stereo 16-bit PCM, Feature Unit 2 Mute/Volume) for Headphones output, and Interface 4 (`EP 0x83` isoch IN, 192 B, `48 kHz` 16-bit PCM, Input Terminal 4 Microphone 1ch + Feature Unit 5 Mute/Volume -> Stream 2ch) for Microphone input.
+  - `Switch2AudioStreamer.cs` manages both directions over USB-C: when a 3.5 mm plug is reported (`BtnHeadset`), it bridges default WASAPI render audio onto `Switch 2 Pro Controller` output (`EnablePro2Audio`, yielding if already default), unmutes/gains the UAC 1.0 capture endpoint (`EnablePro2UsbMic`), and can temporarily switch Windows default recording roles via `WindowsAudioPolicyConfig.cs` (`AutoSwitchPro2UsbMic`), muting and restoring the prior default mic when unplugged or disconnected.
+- **Bluetooth LE (GATT Opus/CELT — speaker output only):**
   - Characteristics inside Nintendo service `ab7de9be-...`:
-    - `cc483f51-9258-427d-a939-630c31f72b06` (`WriteWithoutResponse`): speaker Opus halves.
-    - `7492866c-ec3e-4619-8258-32755ffcc0f9` (`Read | Notify`): 112-byte extended report (byte `0x0D` = jack state: `0x05`/`0x0D` headphones, `0x07`/`0x0F` headset+mic; `0x0E` = mic len `0`/`0x32`; `0x41` = motion len). Subscribed only after BLE handshake completes.
-    - `3dacbc7e-6955-40b5-8eaf-6f9809e8b380` (`WriteWithoutResponse`): setup frames `00 18 91 01 03 00 01 00 00 07` (+25 ms) and `00 17 91 01 02 00 07 00 00 80 BB 00 00 02 F0 00` (+10 ms).
+    - `cc483f51-9258-427d-a939-630c31f72b06` (`WriteWithoutResponse`, handle `0x002C`): speaker Opus halves.
+    - `7492866c-ec3e-4619-8258-32755ffcc0f9` (`Read | Notify`, handle `0x002E`): 112-byte extended report carrying a 50-byte (`0x32`) undocumented audio payload at offset `0x0F`. Kept unsubscribed during normal BLE operation; jack insertion is detected cleanly via `BtnHeadset` in standard Input Report `0x05` (`ab7de9be-...fd2`).
+    - `3dacbc7e-6955-40b5-8eaf-6f9809e8b380` (`WriteWithoutResponse`, handle `0x0032`): setup frames `00 18 91 01 03 00 01 00 00 07` (+25 ms) and `00 17 91 01 02 00 07 00 00 80 BB 00 00 02 F0 00` (+10 ms).
   - Codec: **48 kHz stereo CELT-only Opus, 96 kbps CBR, 20 ms frames (960 samples/ch → 240 bytes, TOC `0xFC`)**, primed with 8 fixed idle packets (`FC FF FE` + 237 zero bytes).
   - Framing: split into two 123-byte GATT writes per 20 ms interval — chunk 1 (`00 04 78` + `opus[0..119]`) at `+0 ms`, chunk 2 (`00 02 78` + `opus[120..239]`) at `+5 ms`.

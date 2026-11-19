@@ -127,24 +127,39 @@ internal sealed class Switch2UsbTransport : ISwitch2Transport
                 }
             }
 
-            foreach (var (command, sub, data) in Ns2Protocol.GetPro2UsbAudioInitSequence())
-            {
-                try
-                {
-                    await SendCommandAsync(command, sub, data, ct);
-                    Log($"Audio init cmd {command:X2}:{sub:X2} ok.");
-                }
-                catch (Exception e)
-                {
-                    Log($"Audio init cmd {command:X2}:{sub:X2} skipped ({e.Message}).");
-                }
-            }
+            await ReinitializeUsbAudioAsync(ct);
         }
 
         _inputThread = new Thread(() => ReadInputLoop(_cts.Token)) { IsBackground = true };
         _inputThread.Start();
 
         Log("USB link ready.");
+    }
+
+    public async Task ReinitializeUsbAudioAsync(CancellationToken ct)
+    {
+        if (_disposed || _productId != Ns2Protocol.PidPro2 || (_useHidCommands && !_device.IsValid) || (!_useHidCommands && _bulkOut == null))
+        {
+            return;
+        }
+
+        foreach (var (command, sub, data) in Ns2Protocol.GetPro2UsbAudioInitSequence())
+        {
+            try
+            {
+                var reply = await SendCommandAsync(command, sub, data, ct);
+                var payloadInfo = reply.Length > 8 ? $", data={Convert.ToHexString(reply.AsSpan(8))}" : "";
+                Log($"Audio init cmd {command:X2}:{sub:X2} ok (replyLen={reply.Length}{payloadInfo}).");
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception e)
+            {
+                Log($"Audio init cmd {command:X2}:{sub:X2} skipped ({e.Message}).");
+            }
+        }
     }
 
     private async Task OpenCommandInterfaceAsync(bool requireBulkIn, CancellationToken ct)
